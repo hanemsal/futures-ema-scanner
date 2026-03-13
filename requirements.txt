@@ -6,3 +6,5 @@ flask
 psycopg2-binary
 sqlalchemy
 requests
+fastapi
+uvicorn
