@@ -22,10 +22,13 @@ def get_usdt_futures_symbols():
     symbols = []
 
     for symbol, market in markets.items():
-        if market.get("quote") == "USDT" and market.get("active") and market.get("swap"):
-            if ":USDT" not in symbol and symbol.endswith("/USDT"):
+        try:
+            if market["quote"] == "USDT" and market["type"] == "swap":
                 symbols.append(symbol)
+        except:
+            pass
 
+    print(f"Toplam futures coin bulundu: {len(symbols)}", flush=True)
     return symbols
 
 
