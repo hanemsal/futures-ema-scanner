@@ -6,13 +6,10 @@ def check_short_entry(df):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
 
-    # EMA11, EMA123'ü yukarıdan aşağı kesiyor
-    cross_down = prev["ema11"] >= prev["ema123"] and curr["ema11"] < curr["ema123"]
+    # EMA11, EMA123'ü yukarıdan aşağı keserse SHORT ENTRY
+    cross_down_123 = prev["ema11"] >= prev["ema123"] and curr["ema11"] < curr["ema123"]
 
-    if cross_down:
-        return True
-
-    return False
+    return cross_down_123
 
 
 def check_short_exit(df):
@@ -23,13 +20,13 @@ def check_short_exit(df):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
 
-    # EMA11 aşağıdan yukarı EMA29 keserse
-    cross_up = prev["ema11"] <= prev["ema29"] and curr["ema11"] > curr["ema29"]
+    # 1️⃣ Öncelikli exit: EMA11, EMA29'u aşağıdan yukarı keserse
+    cross_up_29 = prev["ema11"] <= prev["ema29"] and curr["ema11"] > curr["ema29"]
 
-    if cross_up:
+    if cross_up_29:
         return True
 
-    # fiyat EMA29 üstüne çıkarsa
+    # 2️⃣ Alternatif exit: fiyat EMA29 üstüne çıkarsa
     if curr["close"] > curr["ema29"]:
         return True
 
