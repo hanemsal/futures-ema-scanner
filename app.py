@@ -47,7 +47,7 @@ def get_top_symbols_by_quote_volume(symbols, top_n=120):
             ranked.append((symbol, quote_volume))
             time.sleep(0.08)
         except Exception as e:
-            print(f"Ticker alınamadı {symbol}: {e}")
+            print(f"Ticker alınamadı {symbol}: {e}", flush=True)
 
     ranked.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in ranked[:top_n]]
@@ -70,10 +70,13 @@ def get_exit_reason(df):
 def scan_once():
     global open_positions
 
+    print("USDT futures coin listesi alınıyor...", flush=True)
     all_symbols = get_usdt_futures_symbols()
+
+    print("Hacme göre coin sıralaması yapılıyor...", flush=True)
     scan_symbols = get_top_symbols_by_quote_volume(all_symbols, top_n=TOP_VOLUME_COUNT)
 
-    print(f"Taranacak coin sayısı: {len(scan_symbols)}")
+    print(f"Taranacak coin sayısı: {len(scan_symbols)}", flush=True)
 
     for symbol in scan_symbols:
         try:
@@ -99,7 +102,7 @@ def scan_once():
                         ema47=float(curr["ema47"]),
                         ema123=float(curr["ema123"]),
                     )
-                    print(f"LONG SIGNAL: {symbol}")
+                    print(f"LONG SIGNAL: {symbol}", flush=True)
                     send_telegram_message(msg)
 
             else:
@@ -114,7 +117,7 @@ def scan_once():
                         reason=reason,
                         pnl_pct=pnl_pct,
                     )
-                    print(f"LONG EXIT: {symbol} | PnL: {pnl_pct:.2f}%")
+                    print(f"LONG EXIT: {symbol} | PnL: {pnl_pct:.2f}%", flush=True)
                     send_telegram_message(msg)
 
                     del open_positions[symbol]
@@ -122,17 +125,18 @@ def scan_once():
             time.sleep(0.10)
 
         except Exception as e:
-            print(f"Hata {symbol}: {e}")
+            print(f"Hata {symbol}: {e}", flush=True)
 
 
 if __name__ == "__main__":
-    print("EMA Scanner başlatıldı...")
+    print("EMA Scanner başlatıldı...", flush=True)
+    send_telegram_message("🚀 EMA Scanner worker started")
 
     while True:
         try:
             scan_once()
         except Exception as e:
-            print("Genel scan hatası:", e)
+            print("Genel scan hatası:", e, flush=True)
 
-        print(f"{SLEEP_SECONDS} saniye bekleniyor...")
+        print(f"{SLEEP_SECONDS} saniye bekleniyor...", flush=True)
         time.sleep(SLEEP_SECONDS)
