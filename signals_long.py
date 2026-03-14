@@ -1,33 +1,38 @@
 def check_long_entry(df):
-
-    # güvenlik
-    if len(df) < 2:
+    """
+    Long entry:
+    EMA11, EMA123'ü aşağıdan yukarı KAPANMIŞ mumda keserse.
+    Son açık mum kullanılmaz.
+    """
+    if len(df) < 3:
         return False
 
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
+    prev_closed = df.iloc[-3]
+    last_closed = df.iloc[-2]
 
-    # EMA11, EMA123'ü aşağıdan yukarı kesiyor
-    cross_up = prev["ema11"] <= prev["ema123"] and curr["ema11"] > curr["ema123"]
+    cross_up_123 = (
+        prev_closed["ema11"] <= prev_closed["ema123"]
+        and last_closed["ema11"] > last_closed["ema123"]
+    )
 
-    if cross_up:
-        return True
-
-    return False
+    return cross_up_123
 
 
 def check_long_exit(df):
-
-    if len(df) < 2:
+    """
+    Long exit:
+    EMA11, EMA47'yi yukarıdan aşağı KAPANMIŞ mumda keserse.
+    Son açık mum kullanılmaz.
+    """
+    if len(df) < 3:
         return False
 
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
+    prev_closed = df.iloc[-3]
+    last_closed = df.iloc[-2]
 
-    # EMA11 yukarıdan aşağı EMA47 kesiyor
-    cross_down = prev["ema11"] >= prev["ema47"] and curr["ema11"] < curr["ema47"]
+    cross_down_47 = (
+        prev_closed["ema11"] >= prev_closed["ema47"]
+        and last_closed["ema11"] < last_closed["ema47"]
+    )
 
-    if cross_down:
-        return True
-
-    return False
+    return cross_down_47
