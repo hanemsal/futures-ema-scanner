@@ -1,33 +1,44 @@
 def check_short_entry(df):
-
-    if len(df) < 2:
+    """
+    Short entry:
+    EMA11, EMA123'ü yukarıdan aşağı KAPANMIŞ mumda keserse.
+    Son açık mum kullanılmaz.
+    """
+    if len(df) < 3:
         return False
 
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
+    prev_closed = df.iloc[-3]
+    last_closed = df.iloc[-2]
 
-    # EMA11, EMA123'ü yukarıdan aşağı keserse SHORT ENTRY
-    cross_down_123 = prev["ema11"] >= prev["ema123"] and curr["ema11"] < curr["ema123"]
+    cross_down_123 = (
+        prev_closed["ema11"] >= prev_closed["ema123"]
+        and last_closed["ema11"] < last_closed["ema123"]
+    )
 
     return cross_down_123
 
 
 def check_short_exit(df):
-
-    if len(df) < 2:
+    """
+    Short exit:
+    1) Ana kural: EMA11, EMA29'u aşağıdan yukarı KAPANMIŞ mumda keserse
+    2) Yedek kural: son kapanmış mumda EMA11, EMA29 üstüne çıkmışsa
+    """
+    if len(df) < 3:
         return False
 
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
+    prev_closed = df.iloc[-3]
+    last_closed = df.iloc[-2]
 
-    # 1️⃣ Öncelikli exit: EMA11, EMA29'u aşağıdan yukarı keserse
-    cross_up_29 = prev["ema11"] <= prev["ema29"] and curr["ema11"] > curr["ema29"]
+    cross_up_29 = (
+        prev_closed["ema11"] <= prev_closed["ema29"]
+        and last_closed["ema11"] > last_closed["ema29"]
+    )
 
     if cross_up_29:
         return True
 
-    # 2️⃣ Alternatif exit: fiyat EMA29 üstüne çıkarsa
-    if curr["close"] > curr["ema29"]:
+    if last_closed["ema11"] > last_closed["ema29"]:
         return True
 
     return False
