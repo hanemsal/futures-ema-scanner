@@ -67,11 +67,29 @@ def get_top_symbols_by_quote_volume(symbols, top_n=120):
     return [s for s, _ in ranked[:top_n]]
 
 
-def get_long_exit_reason(df):
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
+def get_closed_signal_rows(df):
+    """
+    Son açık mumu kullanmayız.
+    - prev_closed = bir önceki kapanmış mum
+    - last_closed = son kapanmış mum
+    """
+    if len(df) < 3:
+        return None, None
 
-    cross_down_47 = prev["ema11"] >= prev["ema47"] and curr["ema11"] < curr["ema47"]
+    prev_closed = df.iloc[-3]
+    last_closed = df.iloc[-2]
+    return prev_closed, last_closed
+
+
+def get_long_exit_reason(df):
+    prev_closed, last_closed = get_closed_signal_rows(df)
+    if prev_closed is None:
+        return "Unknown"
+
+    cross_down_47 = (
+        prev_closed["ema11"] >= prev_closed["ema47"]
+        and last_closed["ema11"] < last_closed["ema47"]
+    )
     if cross_down_47:
         return "EMA11 crossed below EMA47"
 
@@ -79,15 +97,19 @@ def get_long_exit_reason(df):
 
 
 def get_short_exit_reason(df):
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
+    prev_closed, last_closed = get_closed_signal_rows(df)
+    if prev_closed is None:
+        return "Unknown"
 
-    cross_up_29 = prev["ema11"] <= prev["ema29"] and curr["ema11"] > curr["ema29"]
+    cross_up_29 = (
+        prev_closed["ema11"] <= prev_closed["ema29"]
+        and last_closed["ema11"] > last_closed["ema29"]
+    )
     if cross_up_29:
         return "EMA11 crossed above EMA29"
 
-    if curr["close"] > curr["ema29"]:
-        return "Price rose above EMA29"
+    if last_closed["ema11"] > last_closed["ema29"]:
+        return "EMA11 moved above EMA29"
 
     return "Unknown"
 
@@ -133,8 +155,13 @@ def scan_once():
                 continue
 
             df = add_ema_indicators(df)
-            current_price = float(df.iloc[-1]["close"])
-            curr = df.iloc[-1]
+
+            prev_closed, last_closed = get_closed_signal_rows(df)
+            if prev_closed is None or last_closed is None:
+                continue
+
+            # Tüm sinyal / entry / exit / metrik hesabı son KAPANMIŞ mumun close'u ile yapılır.
+            current_price = float(last_closed["close"])
             current_ts = datetime.now(timezone.utc)
 
             # LONG ENTRY
@@ -159,9 +186,9 @@ def scan_once():
                     msg = format_long_signal(
                         symbol=symbol,
                         price=current_price,
-                        ema11=float(curr["ema11"]),
-                        ema47=float(curr["ema47"]),
-                        ema123=float(curr["ema123"]),
+                        ema11=float(last_closed["ema11"]),
+                        ema47=float(last_closed["ema47"]),
+                        ema123=float(last_closed["ema123"]),
                     )
 
                     print(f"LONG SIGNAL: {symbol}", flush=True)
@@ -238,9 +265,9 @@ def scan_once():
                     msg = format_short_signal(
                         symbol=symbol,
                         price=current_price,
-                        ema11=float(curr["ema11"]),
-                        ema29=float(curr["ema29"]),
-                        ema123=float(curr["ema123"]),
+                        ema11=float(last_closed["ema11"]),
+                        ema29=float(last_closed["ema29"]),
+                        ema123=float(last_closed["ema123"]),
                     )
 
                     print(f"SHORT SIGNAL: {symbol}", flush=True)
