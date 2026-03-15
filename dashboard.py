@@ -65,6 +65,7 @@ def dashboard():
             padding:8px;
             text-align:left;
             vertical-align:top;
+            white-space:nowrap;
         }}
         th {{
             background:#222;
@@ -115,6 +116,28 @@ def dashboard():
     </table>
     </div>
 
+    <h2>Mode Performansı</h2>
+    <div class="wrap">
+    <table>
+        <tr>
+            <th>Pump Trades</th>
+            <th>Dip Trades</th>
+            <th>Pump Win Rate</th>
+            <th>Dip Win Rate</th>
+            <th>Pump PnL</th>
+            <th>Dip PnL</th>
+        </tr>
+        <tr>
+            <td>{stats['pump_total']}</td>
+            <td>{stats['dip_total']}</td>
+            <td>{stats['pump_win_rate']:.2f}%</td>
+            <td>{stats['dip_win_rate']:.2f}%</td>
+            <td>{stats['pump_pnl']:.2f}%</td>
+            <td>{stats['dip_pnl']:.2f}%</td>
+        </tr>
+    </table>
+    </div>
+
     <h2>Top Coin Performansı</h2>
     <div class="wrap">
     <table>
@@ -147,44 +170,56 @@ def dashboard():
         <th>ID</th>
         <th>Symbol</th>
         <th>Side</th>
+        <th>Mode</th>
         <th>Cross Time</th>
         <th>Cross Price</th>
         <th>Entry</th>
         <th>Exit</th>
         <th>Exit Time</th>
         <th>QuoteVol 24h</th>
+        <th>MarketCap</th>
         <th>Cross Candle Vol</th>
         <th>Vol Ratio</th>
+        <th>EMA Set</th>
         <th>EMA Distance</th>
         <th>PnL</th>
         <th>Duration</th>
         <th>Max Profit</th>
         <th>Max Drawdown</th>
         <th>RR</th>
+        <th>Entry Reason</th>
         <th>Exit Reason</th>
     </tr>
     """
 
     for t in stats["recent_trades"]:
+        ema_set = "-"
+        if t.ema_fast is not None and t.ema_mid is not None and t.ema_trend is not None:
+            ema_set = f"{t.ema_fast}/{t.ema_mid}/{t.ema_trend}"
+
         html += f"""
         <tr>
             <td>{t.id}</td>
             <td>{t.symbol}</td>
             <td>{t.side}</td>
+            <td>{t.mode or '-'}</td>
             <td>{fmt_dt(t.cross_time)}</td>
             <td>{fmt_num(t.cross_price, 6)}</td>
             <td>{fmt_num(t.entry_price, 6)}</td>
             <td>{fmt_num(t.exit_price, 6) if t.exit_price is not None else '-'}</td>
             <td>{fmt_dt(t.exit_time)}</td>
             <td>{fmt_big(t.quote_volume_24h)}</td>
+            <td>{fmt_big(t.market_cap)}</td>
             <td>{fmt_big(t.cross_candle_volume)}</td>
             <td>{fmt_num(t.volume_ratio, 2)}</td>
+            <td>{ema_set}</td>
             <td>{fmt_pct(t.ema_distance, 4)}</td>
             <td>{fmt_pct(t.pnl_pct, 2) if t.pnl_pct is not None else '-'}</td>
             <td>{format_duration_from_minutes(t.duration_minutes)}</td>
             <td>{fmt_pct(t.max_profit_pct, 2)}</td>
             <td>{fmt_pct(t.max_drawdown_pct, 2)}</td>
             <td>{fmt_num(t.rr_ratio, 2)}</td>
+            <td>{t.entry_reason or '-'}</td>
             <td>{t.exit_reason or '-'}</td>
         </tr>
         """
