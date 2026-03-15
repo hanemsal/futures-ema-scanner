@@ -1,9 +1,8 @@
 import requests
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TIMEFRAME
 
 
 def send_telegram_message(text: str):
-
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram ayarlı değil, mesaj atlanıyor.", flush=True)
         return
@@ -19,53 +18,52 @@ def send_telegram_message(text: str):
     try:
         response = requests.post(url, data=payload, timeout=15)
         print("Telegram response:", response.status_code, response.text, flush=True)
-
     except Exception as e:
         print("Telegram gönderim hatası:", e, flush=True)
 
 
-def format_long_signal(symbol: str, price: float, ema11: float, ema47: float, ema123: float):
-
+def format_entry_signal(
+    symbol: str,
+    side: str,
+    mode: str,
+    price: float,
+    ema_fast_val: float,
+    ema_mid_val: float,
+    ema_trend_val: float,
+    ema_fast_len: int,
+    ema_mid_len: int,
+    ema_trend_len: int,
+    vol_ratio: float,
+    quote_vol_24h: float,
+):
+    icon = "🟢" if side == "LONG" else "🔻"
     return (
-        f"🟢 <b>LONG SIGNAL</b>\n\n"
+        f"{icon} <b>{side} SIGNAL</b>\n\n"
         f"<b>Coin:</b> {symbol}\n"
+        f"<b>Mode:</b> {mode}\n"
         f"<b>Price:</b> {price:.6f}\n"
-        f"<b>TF:</b> 15m\n\n"
-        f"<b>EMA11:</b> {ema11:.6f}\n"
-        f"<b>EMA47:</b> {ema47:.6f}\n"
-        f"<b>EMA123:</b> {ema123:.6f}"
+        f"<b>TF:</b> {TIMEFRAME}\n\n"
+        f"<b>EMA Fast ({ema_fast_len}):</b> {ema_fast_val:.6f}\n"
+        f"<b>EMA Mid ({ema_mid_len}):</b> {ema_mid_val:.6f}\n"
+        f"<b>EMA Trend ({ema_trend_len}):</b> {ema_trend_val:.6f}\n"
+        f"<b>Vol Ratio:</b> {vol_ratio:.2f}\n"
+        f"<b>QuoteVol 24h:</b> {quote_vol_24h:.2f}"
     )
 
 
-def format_long_exit(symbol: str, price: float, reason: str, pnl_pct: float = 0.0):
-
+def format_exit_signal(
+    symbol: str,
+    side: str,
+    mode: str,
+    price: float,
+    reason: str,
+    pnl_pct: float = 0.0,
+):
+    icon = "🔴" if side == "LONG" else "⚪"
     return (
-        f"🔴 <b>LONG EXIT</b>\n\n"
+        f"{icon} <b>{side} EXIT</b>\n\n"
         f"<b>Coin:</b> {symbol}\n"
-        f"<b>Exit Price:</b> {price:.6f}\n"
-        f"<b>Reason:</b> {reason}\n"
-        f"<b>PnL:</b> {pnl_pct:.2f}%"
-    )
-
-
-def format_short_signal(symbol: str, price: float, ema11: float, ema29: float, ema123: float):
-
-    return (
-        f"🔻 <b>SHORT SIGNAL</b>\n\n"
-        f"<b>Coin:</b> {symbol}\n"
-        f"<b>Price:</b> {price:.6f}\n"
-        f"<b>TF:</b> 15m\n\n"
-        f"<b>EMA11:</b> {ema11:.6f}\n"
-        f"<b>EMA29:</b> {ema29:.6f}\n"
-        f"<b>EMA123:</b> {ema123:.6f}"
-    )
-
-
-def format_short_exit(symbol: str, price: float, reason: str, pnl_pct: float = 0.0):
-
-    return (
-        f"⚪ <b>SHORT EXIT</b>\n\n"
-        f"<b>Coin:</b> {symbol}\n"
+        f"<b>Mode:</b> {mode}\n"
         f"<b>Exit Price:</b> {price:.6f}\n"
         f"<b>Reason:</b> {reason}\n"
         f"<b>PnL:</b> {pnl_pct:.2f}%"
