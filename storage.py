@@ -18,6 +18,7 @@ class Trade(Base):
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(50), index=True)
     side = Column(String(10), index=True)  # LONG / SHORT
+    mode = Column(String(20), index=True, nullable=True)  # PUMP / DIP
 
     entry_price = Column(Float, nullable=False)
     exit_price = Column(Float, nullable=True)
@@ -27,14 +28,21 @@ class Trade(Base):
 
     cross_time = Column(DateTime, nullable=True)
     cross_price = Column(Float, nullable=True)
+
     quote_volume_24h = Column(Float, nullable=True, default=0.0)
     cross_candle_volume = Column(Float, nullable=True, default=0.0)
-    ema_distance = Column(Float, nullable=True, default=0.0)  # yüzde
+    ema_distance = Column(Float, nullable=True, default=0.0)
     volume_ratio = Column(Float, nullable=True, default=0.0)
+    market_cap = Column(Float, nullable=True)
 
-    status = Column(String(20), index=True, default="OPEN")
+    ema_fast = Column(Integer, nullable=True)
+    ema_mid = Column(Integer, nullable=True)
+    ema_trend = Column(Integer, nullable=True)
+
+    entry_reason = Column(String(255), nullable=True)
     exit_reason = Column(String(255), nullable=True)
 
+    status = Column(String(20), index=True, default="OPEN")
     pnl_pct = Column(Float, nullable=True, default=0.0)
     timeframe = Column(String(20), nullable=True, default="15m")
 
@@ -70,6 +78,13 @@ def _add_missing_columns():
         "cross_candle_volume": "FLOAT NULL DEFAULT 0.0",
         "ema_distance": "FLOAT NULL DEFAULT 0.0",
         "volume_ratio": "FLOAT NULL DEFAULT 0.0",
+        "mode": "VARCHAR(20) NULL",
+        "market_cap": "FLOAT NULL",
+        "ema_fast": "INTEGER NULL",
+        "ema_mid": "INTEGER NULL",
+        "ema_trend": "INTEGER NULL",
+        "entry_reason": "VARCHAR(255) NULL",
+        "exit_reason": "VARCHAR(255) NULL",
     }
 
     with engine.begin() as conn:
@@ -95,12 +110,19 @@ def create_trade(
     cross_candle_volume=0.0,
     ema_distance=0.0,
     volume_ratio=0.0,
+    mode=None,
+    market_cap=None,
+    ema_fast=None,
+    ema_mid=None,
+    ema_trend=None,
+    entry_reason=None,
 ):
     session = SessionLocal()
     try:
         trade = Trade(
             symbol=symbol,
             side=side,
+            mode=mode,
             entry_price=entry_price,
             entry_time=entry_time,
             status="OPEN",
@@ -111,6 +133,11 @@ def create_trade(
             cross_candle_volume=cross_candle_volume,
             ema_distance=ema_distance,
             volume_ratio=volume_ratio,
+            market_cap=market_cap,
+            ema_fast=ema_fast,
+            ema_mid=ema_mid,
+            ema_trend=ema_trend,
+            entry_reason=entry_reason,
             max_profit_pct=0.0,
             max_drawdown_pct=0.0,
             duration_minutes=0.0,
@@ -216,6 +243,30 @@ def get_dashboard_stats():
         long_pnl = sum((t.pnl_pct or 0) for t in long_closed)
         short_pnl = sum((t.pnl_pct or 0) for t in short_closed)
 
+        pump_closed = session.query(Trade).filter(
+            Trade.mode == "PUMP",
+            Trade.status == "CLOSED",
+        ).all()
+        dip_closed = session.query(Trade).filter(
+            Trade.mode == "DIP",
+            Trade.status == "CLOSED",
+        ).all()
+
+        pump_total = session.query(Trade).filter(Trade.mode == "PUMP").count()
+        dip_total = session.query(Trade).filter(Trade.mode == "DIP").count()
+
+        pump_win_rate = (
+            sum(1 for t in pump_closed if (t.pnl_pct or 0) > 0) / len(pump_closed) * 100
+            if pump_closed else 0.0
+        )
+        dip_win_rate = (
+            sum(1 for t in dip_closed if (t.pnl_pct or 0) > 0) / len(dip_closed) * 100
+            if dip_closed else 0.0
+        )
+
+        pump_pnl = sum((t.pnl_pct or 0) for t in pump_closed)
+        dip_pnl = sum((t.pnl_pct or 0) for t in dip_closed)
+
         coin_rows = {}
         for t in closed_trades:
             if t.symbol not in coin_rows:
@@ -242,7 +293,7 @@ def get_dashboard_stats():
         recent_trades = (
             session.query(Trade)
             .order_by(Trade.id.desc())
-            .limit(500)
+            .limit(200)
             .all()
         )
 
@@ -261,6 +312,12 @@ def get_dashboard_stats():
             "short_total": short_total,
             "long_pnl": long_pnl,
             "short_pnl": short_pnl,
+            "pump_total": pump_total,
+            "dip_total": dip_total,
+            "pump_win_rate": pump_win_rate,
+            "dip_win_rate": dip_win_rate,
+            "pump_pnl": pump_pnl,
+            "dip_pnl": dip_pnl,
             "coin_ranking": coin_ranking[:30],
             "recent_trades": recent_trades,
         }
