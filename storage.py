@@ -242,7 +242,7 @@ def get_dashboard_stats():
         recent_trades = (
             session.query(Trade)
             .order_by(Trade.id.desc())
-            .limit(50)
+            .limit(500)
             .all()
         )
 
