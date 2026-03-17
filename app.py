@@ -41,7 +41,11 @@ from storage import (
     is_symbol_in_cooldown,
     compute_cooldown_until,
 )
-from telegram_utils import send_telegram_message, format_signal_message
+from telegram_utils import (
+    send_telegram_message,
+    format_signal_message,
+    format_exit_message,
+)
 
 exchange = ccxt.binance({
     "options": {"defaultType": "future"},
@@ -168,7 +172,6 @@ def get_breakout_level(df: pd.DataFrame) -> float | None:
     if len(df) < BREAKOUT_LOOKBACK + 3:
         return None
 
-    # son kapalı mum hariç önceki BREAKOUT_LOOKBACK mumun high seviyesi
     window = df.iloc[-(BREAKOUT_LOOKBACK + 2):-2]
     if window.empty:
         return None
@@ -215,7 +218,6 @@ def calc_signal_score(
 ) -> float:
     score = 0.0
 
-    # Trend alignment: 20
     if float(last_closed["ema_mid"]) > float(last_closed["ema_trend"]):
         score += 10
     if float(last_closed["ema_fast"]) > float(last_closed["ema_mid"]):
@@ -223,23 +225,19 @@ def calc_signal_score(
     if float(last_closed["close"]) > float(last_closed["ema_trend"]):
         score += 5
 
-    # Compression: 20
     if compression_ok:
         score += 20
 
-    # Breakout: 25
     if breakout_ok:
         score += 25
     elif near_breakout_ok:
         score += 12
 
-    # Relative volume: 20
     if volume_ratio >= STRONG_VOL_RATIO:
         score += 20
     elif volume_ratio >= MIN_VOL_RATIO:
         score += 14
 
-    # Intraday momentum: 15
     if change_4h >= MIN_CHANGE_4H_PRIORITY:
         score += 10
     elif change_4h > 0:
@@ -281,16 +279,13 @@ def should_exit_trade(position: dict, raw_df_15m: pd.DataFrame):
     ema_fast = float(last_closed["ema_fast"])
     ema_mid = float(last_closed["ema_mid"])
 
-    # 1) Hard TP2
     if position.get("max_profit_pct", 0.0) >= HARD_TP2_PCT:
         return True, f"Hard TP2 reached ({HARD_TP2_PCT:.1f}%)"
 
-    # 2) Trailing aktifse EMA9 altı çık
     if position.get("max_profit_pct", 0.0) >= ARM_TRAILING_AT_PROFIT_PCT:
         if close_price < ema_fast:
             return True, f"Trailing exit below EMA{PUMP_EMA_FAST}"
 
-    # 3) Fail exit
     if ema_fast < ema_mid and close_price < ema_mid:
         return True, f"Fail exit: EMA{PUMP_EMA_FAST}<EMA{PUMP_EMA_MID} and close<EMA{PUMP_EMA_MID}"
 
@@ -309,36 +304,30 @@ def evaluate_pump_long_signal(symbol, df_15m, df_5m, quote_vol_24h):
     if prev_closed is None:
         return None
 
-    # Trend
     if not is_trend_ok(last_closed):
         return None
 
-    # Cross
     if not crosses_above(
         prev_closed["ema_fast"], prev_closed["ema_mid"],
         last_closed["ema_fast"], last_closed["ema_mid"]
     ):
         return None
 
-    # Relative volume
     cross_candle_volume = calc_cross_candle_quote_volume(last_closed)
     avg_qv_10 = calc_avg_quote_volume_last_10_closed(df_15m)
     volume_ratio = (cross_candle_volume / avg_qv_10) if avg_qv_10 > 0 else 0.0
     if volume_ratio < MIN_VOL_RATIO:
         return None
 
-    # Compression
     compression_ok, fast_mid_gap_pct, mid_trend_gap_pct = is_compression_ok(last_closed)
 
-    # Breakout
     breakout_level = get_breakout_level(df_15m)
     breakout_ok, near_breakout_ok = is_breakout_ok(last_closed, breakout_level)
     if not breakout_ok:
         return None
 
-    # 5m / 15m momentum
-    change_1h = calc_change_from_lookback(df_5m, 12)   # 12x5m = 1h
-    change_4h = calc_change_from_lookback(df_15m, 16)  # 16x15m = 4h
+    change_1h = calc_change_from_lookback(df_5m, 12)
+    change_4h = calc_change_from_lookback(df_15m, 16)
 
     score = calc_signal_score(
         last_closed=last_closed,
@@ -395,12 +384,10 @@ def scan_once():
             if quote_volume_24h < MIN_QUOTEVOL24H:
                 continue
 
-            # 15m ana veri
             df_15m = fetch_ohlcv_df(symbol, timeframe=TIMEFRAME, limit=CANDLE_LIMIT)
             if len(df_15m) < max(PUMP_EMA_TREND, BREAKOUT_LOOKBACK) + 10:
                 continue
 
-            # 5m momentum verisi
             df_5m = fetch_ohlcv_df(symbol, timeframe=MOMENTUM_TIMEFRAME, limit=max(80, CANDLE_LIMIT // 2))
             if len(df_5m) < 30:
                 continue
@@ -417,7 +404,6 @@ def scan_once():
             )
             cross_price = current_price
 
-            # Açık pozisyon yoksa yeni sinyal ara
             if symbol not in open_long_positions:
                 signal = evaluate_pump_long_signal(
                     symbol=symbol,
@@ -508,7 +494,6 @@ def scan_once():
                     )
                     send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg)
 
-            # Açık pozisyon varsa yönet
             elif symbol in open_long_positions:
                 pos = open_long_positions[symbol]
 
@@ -544,14 +529,13 @@ def scan_once():
                         rr_ratio=rr_ratio,
                     )
 
-                    exit_msg = (
-                        f"🔴 <b>PUMP HUNTER EXIT</b>\n\n"
-                        f"<b>Coin:</b> {symbol}\n"
-                        f"<b>Side:</b> LONG\n"
-                        f"<b>Mode:</b> PUMP\n"
-                        f"<b>Exit Price:</b> {current_price:.8f}\n"
-                        f"<b>PnL:</b> {live_pnl:.2f}%\n"
-                        f"<b>Reason:</b> {reason}"
+                    exit_msg = format_exit_message(
+                        symbol=symbol,
+                        side="LONG",
+                        mode="PUMP",
+                        exit_price=current_price,
+                        pnl_pct=live_pnl,
+                        reason=reason,
                     )
 
                     print(
