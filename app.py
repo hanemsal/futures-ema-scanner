@@ -4,35 +4,44 @@ from datetime import datetime, timezone
 import ccxt
 import pandas as pd
 
-from indicators import add_ema_set
-from telegram_utils import (
-    send_telegram_message,
-    format_entry_signal,
-    format_exit_signal,
-)
 from config import (
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
     TIMEFRAME,
+    MOMENTUM_TIMEFRAME,
     SLEEP_SECONDS,
     CANDLE_LIMIT,
     EXCLUDED_SYMBOLS,
-    PUMP_MIN_QUOTEVOL24H,
-    PUMP_MAX_QUOTEVOL24H,
-    PUMP_MIN_MARKETCAP,
-    PUMP_MAX_MARKETCAP,
+    ENABLE_PUMP_LONG,
+    MIN_QUOTEVOL24H,
     PUMP_EMA_FAST,
     PUMP_EMA_MID,
     PUMP_EMA_TREND,
-    PUMP_MIN_VOL_RATIO,
-    DIP_MIN_QUOTEVOL24H,
-    DIP_MAX_QUOTEVOL24H,
-    DIP_MIN_MARKETCAP,
-    DIP_MAX_MARKETCAP,
-    DIP_EMA_FAST,
-    DIP_EMA_MID,
-    DIP_EMA_TREND,
-    DIP_MIN_VOL_RATIO,
+    MAX_EMA_FAST_MID_GAP_PCT,
+    MAX_EMA_MID_TREND_GAP_PCT,
+    BREAKOUT_LOOKBACK,
+    BREAKOUT_NEAR_PCT,
+    MIN_VOL_RATIO,
+    STRONG_VOL_RATIO,
+    MIN_CHANGE_1H_PRIORITY,
+    MIN_CHANGE_4H_PRIORITY,
+    SIGNAL_COOLDOWN_MINUTES,
+    MIN_SIGNAL_SCORE,
+    A_GRADE_SCORE,
+    ARM_TRAILING_AT_PROFIT_PCT,
+    HARD_TP1_PCT,
+    HARD_TP2_PCT,
 )
-from storage import init_db, create_trade, update_trade_metrics, close_trade
+from indicators import add_ema_set
+from storage import (
+    init_db,
+    create_trade,
+    update_trade_metrics,
+    close_trade,
+    is_symbol_in_cooldown,
+    compute_cooldown_until,
+)
+from telegram_utils import send_telegram_message, format_signal_message
 
 exchange = ccxt.binance({
     "options": {"defaultType": "future"},
@@ -40,7 +49,6 @@ exchange = ccxt.binance({
 })
 
 open_long_positions = {}
-open_short_positions = {}
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -53,7 +61,7 @@ def get_usdt_futures_symbols():
 
     for symbol, market in markets.items():
         try:
-            if market["quote"] == "USDT" and market["type"] == "swap":
+            if market["quote"] == "USDT" and market["type"] == "swap" and market.get("active", True):
                 if normalize_symbol(symbol) in EXCLUDED_SYMBOLS:
                     continue
                 symbols.append(symbol)
@@ -64,7 +72,7 @@ def get_usdt_futures_symbols():
     return symbols
 
 
-def fetch_ohlcv_df(symbol: str, timeframe: str = "15m", limit: int = 200):
+def fetch_ohlcv_df(symbol: str, timeframe: str, limit: int):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(
         ohlcv,
@@ -83,64 +91,170 @@ def fetch_all_tickers_map():
 
 def get_quote_volume_24h(ticker: dict) -> float:
     try:
-        return float(
-            ticker.get("quoteVolume")
-            or ticker.get("baseVolumeQuote")
-            or 0.0
-        )
+        return float(ticker.get("quoteVolume") or ticker.get("baseVolumeQuote") or 0.0)
     except Exception:
         return 0.0
 
 
-def get_market_cap(symbol: str, market: dict) -> float | None:
-    """
-    Binance futures verisinde güvenilir market cap yok.
-    Alanı geleceğe hazır tutuyoruz.
-    """
-    try:
-        info = market.get("info") or {}
-        for key in ("marketCap", "market_cap", "marketcap"):
-            if info.get(key) is not None:
-                return float(info.get(key))
-    except Exception:
-        pass
-    return None
+def get_closed_signal_rows(df: pd.DataFrame):
+    if len(df) < 3:
+        return None, None
+    prev_closed = df.iloc[-3]
+    last_closed = df.iloc[-2]
+    return prev_closed, last_closed
 
 
 def crosses_above(prev_fast, prev_mid, curr_fast, curr_mid) -> bool:
     return prev_fast <= prev_mid and curr_fast > curr_mid
 
 
-def crosses_below(prev_fast, prev_mid, curr_fast, curr_mid) -> bool:
-    return prev_fast >= prev_mid and curr_fast < curr_mid
+def calc_cross_candle_quote_volume(last_closed):
+    return float(last_closed["close"]) * float(last_closed["volume"])
 
 
-def in_range(value, min_v, max_v) -> bool:
-    if value is None:
-        return False
-    return min_v <= value <= max_v
+def calc_avg_quote_volume_last_10_closed(df):
+    if len(df) < 13:
+        return 0.0
+    recent = df.iloc[-12:-2].copy()
+    if recent.empty:
+        return 0.0
+    return float((recent["close"] * recent["volume"]).mean())
 
 
-def passes_marketcap_filter(market_cap, min_cap, max_cap) -> bool:
-    if market_cap is None:
-        return True
-    return min_cap <= market_cap <= max_cap
+def calc_ema_distance(last_closed):
+    price = float(last_closed["close"])
+    if price <= 0:
+        return 0.0
+    return abs(float(last_closed["ema_fast"]) - float(last_closed["ema_trend"])) / price * 100.0
 
 
-def get_closed_signal_rows(df):
-    if len(df) < 3:
-        return None, None
+def pct_change(a, b):
+    if b is None or b == 0:
+        return 0.0
+    return ((a - b) / b) * 100.0
 
-    prev_closed = df.iloc[-3]
+
+def calc_change_from_lookback(df: pd.DataFrame, candles_back: int) -> float:
+    if len(df) < candles_back + 2:
+        return 0.0
     last_closed = df.iloc[-2]
-    return prev_closed, last_closed
+    ref = df.iloc[-2 - candles_back]
+    return pct_change(float(last_closed["close"]), float(ref["close"]))
 
 
-def calc_live_metrics(side: str, entry_price: float, current_price: float, position: dict, entry_time: datetime):
-    if side == "LONG":
-        live_pnl = ((current_price - entry_price) / entry_price) * 100.0
-    else:
-        live_pnl = ((entry_price - current_price) / current_price) * 100.0
+def is_trend_ok(last_closed) -> bool:
+    return (
+        float(last_closed["ema_mid"]) > float(last_closed["ema_trend"])
+        and float(last_closed["close"]) > float(last_closed["ema_trend"])
+    )
+
+
+def is_compression_ok(last_closed) -> tuple[bool, float, float]:
+    close_price = float(last_closed["close"])
+    if close_price <= 0:
+        return False, 999.0, 999.0
+
+    fast_mid_gap_pct = abs(float(last_closed["ema_fast"]) - float(last_closed["ema_mid"])) / close_price * 100.0
+    mid_trend_gap_pct = abs(float(last_closed["ema_mid"]) - float(last_closed["ema_trend"])) / close_price * 100.0
+
+    ok = (
+        fast_mid_gap_pct <= MAX_EMA_FAST_MID_GAP_PCT
+        and mid_trend_gap_pct <= MAX_EMA_MID_TREND_GAP_PCT
+    )
+    return ok, fast_mid_gap_pct, mid_trend_gap_pct
+
+
+def get_breakout_level(df: pd.DataFrame) -> float | None:
+    if len(df) < BREAKOUT_LOOKBACK + 3:
+        return None
+
+    # son kapalı mum hariç önceki BREAKOUT_LOOKBACK mumun high seviyesi
+    window = df.iloc[-(BREAKOUT_LOOKBACK + 2):-2]
+    if window.empty:
+        return None
+
+    return float(window["high"].max())
+
+
+def is_breakout_ok(last_closed, breakout_level: float | None) -> tuple[bool, bool]:
+    if breakout_level is None or breakout_level <= 0:
+        return False, False
+
+    close_price = float(last_closed["close"])
+    breakout_ok = close_price > breakout_level
+    near_breakout_ok = close_price >= breakout_level * (1 - BREAKOUT_NEAR_PCT / 100.0)
+    return breakout_ok, near_breakout_ok
+
+
+def get_setup_type(compression_ok: bool, breakout_ok: bool, near_breakout_ok: bool) -> str:
+    if compression_ok and breakout_ok:
+        return "Compression Breakout"
+    if compression_ok and near_breakout_ok:
+        return "Compression Near Breakout"
+    if breakout_ok:
+        return "Breakout"
+    return "Trend Continuation"
+
+
+def quality_from_score(score: float) -> str:
+    if score >= A_GRADE_SCORE:
+        return "A"
+    if score >= MIN_SIGNAL_SCORE:
+        return "B"
+    return "C"
+
+
+def calc_signal_score(
+    last_closed,
+    compression_ok: bool,
+    breakout_ok: bool,
+    near_breakout_ok: bool,
+    volume_ratio: float,
+    change_1h: float,
+    change_4h: float,
+) -> float:
+    score = 0.0
+
+    # Trend alignment: 20
+    if float(last_closed["ema_mid"]) > float(last_closed["ema_trend"]):
+        score += 10
+    if float(last_closed["ema_fast"]) > float(last_closed["ema_mid"]):
+        score += 5
+    if float(last_closed["close"]) > float(last_closed["ema_trend"]):
+        score += 5
+
+    # Compression: 20
+    if compression_ok:
+        score += 20
+
+    # Breakout: 25
+    if breakout_ok:
+        score += 25
+    elif near_breakout_ok:
+        score += 12
+
+    # Relative volume: 20
+    if volume_ratio >= STRONG_VOL_RATIO:
+        score += 20
+    elif volume_ratio >= MIN_VOL_RATIO:
+        score += 14
+
+    # Intraday momentum: 15
+    if change_4h >= MIN_CHANGE_4H_PRIORITY:
+        score += 10
+    elif change_4h > 0:
+        score += 5
+
+    if change_1h >= MIN_CHANGE_1H_PRIORITY:
+        score += 5
+    elif change_1h > 0:
+        score += 2
+
+    return float(min(score, 100.0))
+
+
+def calc_live_metrics(entry_price: float, current_price: float, position: dict, entry_time: datetime):
+    live_pnl = ((current_price - entry_price) / entry_price) * 100.0
 
     max_profit_pct = max(position.get("max_profit_pct", 0.0), live_pnl)
     max_drawdown_pct = min(position.get("max_drawdown_pct", 0.0), live_pnl)
@@ -157,173 +271,119 @@ def calc_live_metrics(side: str, entry_price: float, current_price: float, posit
     return live_pnl, max_profit_pct, max_drawdown_pct, duration_minutes, rr_ratio
 
 
-def calc_cross_candle_quote_volume(last_closed):
-    return float(last_closed["close"]) * float(last_closed["volume"])
-
-
-def calc_avg_quote_volume_last_10_closed(df):
-    if len(df) < 13:
-        return 0.0
-
-    recent = df.iloc[-12:-2].copy()
-    if recent.empty:
-        return 0.0
-
-    return float((recent["close"] * recent["volume"]).mean())
-
-
-def calc_ema_distance(last_closed):
-    price = float(last_closed["close"])
-    if price <= 0:
-        return 0.0
-
-    return abs(float(last_closed["ema_fast"]) - float(last_closed["ema_trend"])) / price * 100.0
-
-
-def evaluate_pump_signal(symbol, df, quote_vol_24h, market_cap, volume_ratio):
-    if not in_range(quote_vol_24h, PUMP_MIN_QUOTEVOL24H, PUMP_MAX_QUOTEVOL24H):
-        return None
-
-    if not passes_marketcap_filter(market_cap, PUMP_MIN_MARKETCAP, PUMP_MAX_MARKETCAP):
-        return None
-
-    df = add_ema_set(df, PUMP_EMA_FAST, PUMP_EMA_MID, PUMP_EMA_TREND)
-    prev_closed, last_closed = get_closed_signal_rows(df)
-    if prev_closed is None:
-        return None
-
-    if (
-        crosses_above(prev_closed["ema_fast"], prev_closed["ema_mid"], last_closed["ema_fast"], last_closed["ema_mid"])
-        and last_closed["ema_mid"] > last_closed["ema_trend"]
-        and last_closed["close"] > last_closed["ema_mid"]
-        and volume_ratio >= PUMP_MIN_VOL_RATIO
-    ):
-        return {
-            "mode": "PUMP",
-            "side": "LONG",
-            "ema_fast_len": PUMP_EMA_FAST,
-            "ema_mid_len": PUMP_EMA_MID,
-            "ema_trend_len": PUMP_EMA_TREND,
-            "entry_reason": "pump_long_fast_cross_above_mid",
-            "last_closed": last_closed,
-        }
-
-    if (
-        crosses_below(prev_closed["ema_fast"], prev_closed["ema_mid"], last_closed["ema_fast"], last_closed["ema_mid"])
-        and last_closed["ema_mid"] < last_closed["ema_trend"]
-        and last_closed["close"] < last_closed["ema_mid"]
-        and volume_ratio >= PUMP_MIN_VOL_RATIO
-    ):
-        return {
-            "mode": "PUMP",
-            "side": "SHORT",
-            "ema_fast_len": PUMP_EMA_FAST,
-            "ema_mid_len": PUMP_EMA_MID,
-            "ema_trend_len": PUMP_EMA_TREND,
-            "entry_reason": "pump_short_fast_cross_below_mid",
-            "last_closed": last_closed,
-        }
-
-    return None
-
-
-def evaluate_dip_signal(symbol, df, quote_vol_24h, market_cap, volume_ratio):
-    if not in_range(quote_vol_24h, DIP_MIN_QUOTEVOL24H, DIP_MAX_QUOTEVOL24H):
-        return None
-
-    if not passes_marketcap_filter(market_cap, DIP_MIN_MARKETCAP, DIP_MAX_MARKETCAP):
-        return None
-
-    df = add_ema_set(df, DIP_EMA_FAST, DIP_EMA_MID, DIP_EMA_TREND)
-    prev_closed, last_closed = get_closed_signal_rows(df)
-    if prev_closed is None:
-        return None
-
-    mid_turning_up = last_closed["ema_mid"] >= prev_closed["ema_mid"]
-    mid_turning_down = last_closed["ema_mid"] <= prev_closed["ema_mid"]
-
-    if (
-        crosses_above(prev_closed["ema_fast"], prev_closed["ema_mid"], last_closed["ema_fast"], last_closed["ema_mid"])
-        and (last_closed["ema_mid"] >= last_closed["ema_trend"] or mid_turning_up)
-        and last_closed["close"] > last_closed["ema_fast"]
-        and volume_ratio >= DIP_MIN_VOL_RATIO
-    ):
-        return {
-            "mode": "DIP",
-            "side": "LONG",
-            "ema_fast_len": DIP_EMA_FAST,
-            "ema_mid_len": DIP_EMA_MID,
-            "ema_trend_len": DIP_EMA_TREND,
-            "entry_reason": "dip_long_fast_cross_above_mid",
-            "last_closed": last_closed,
-        }
-
-    if (
-        crosses_below(prev_closed["ema_fast"], prev_closed["ema_mid"], last_closed["ema_fast"], last_closed["ema_mid"])
-        and (last_closed["ema_mid"] <= last_closed["ema_trend"] or mid_turning_down)
-        and last_closed["close"] < last_closed["ema_fast"]
-        and volume_ratio >= DIP_MIN_VOL_RATIO
-    ):
-        return {
-            "mode": "DIP",
-            "side": "SHORT",
-            "ema_fast_len": DIP_EMA_FAST,
-            "ema_mid_len": DIP_EMA_MID,
-            "ema_trend_len": DIP_EMA_TREND,
-            "entry_reason": "dip_short_fast_cross_below_mid",
-            "last_closed": last_closed,
-        }
-
-    return None
-
-
-def get_exit_reason(df, side: str) -> str:
-    prev_closed, last_closed = get_closed_signal_rows(df)
-    if prev_closed is None:
-        return "Unknown"
-
-    if side == "LONG":
-        if crosses_below(prev_closed["ema_fast"], prev_closed["ema_mid"], last_closed["ema_fast"], last_closed["ema_mid"]):
-            return "EMA fast crossed below EMA mid"
-        return "EMA fast moved below EMA mid"
-
-    if side == "SHORT":
-        if crosses_above(prev_closed["ema_fast"], prev_closed["ema_mid"], last_closed["ema_fast"], last_closed["ema_mid"]):
-            return "EMA fast crossed above EMA mid"
-        return "EMA fast moved above EMA mid"
-
-    return "Unknown"
-
-
-def should_exit_trade(trade_meta: dict, raw_df: pd.DataFrame):
-    df = add_ema_set(
-        raw_df,
-        trade_meta["ema_fast_len"],
-        trade_meta["ema_mid_len"],
-        trade_meta["ema_trend_len"],
-    )
+def should_exit_trade(position: dict, raw_df_15m: pd.DataFrame):
+    df = add_ema_set(raw_df_15m, PUMP_EMA_FAST, PUMP_EMA_MID, PUMP_EMA_TREND)
     prev_closed, last_closed = get_closed_signal_rows(df)
     if prev_closed is None:
         return False, "Unknown"
 
-    if trade_meta["side"] == "LONG":
-        if crosses_below(prev_closed["ema_fast"], prev_closed["ema_mid"], last_closed["ema_fast"], last_closed["ema_mid"]):
-            return True, get_exit_reason(df, "LONG")
-    else:
-        if crosses_above(prev_closed["ema_fast"], prev_closed["ema_mid"], last_closed["ema_fast"], last_closed["ema_mid"]):
-            return True, get_exit_reason(df, "SHORT")
+    close_price = float(last_closed["close"])
+    ema_fast = float(last_closed["ema_fast"])
+    ema_mid = float(last_closed["ema_mid"])
 
-    return False, "Unknown"
+    # 1) Hard TP2
+    if position.get("max_profit_pct", 0.0) >= HARD_TP2_PCT:
+        return True, f"Hard TP2 reached ({HARD_TP2_PCT:.1f}%)"
+
+    # 2) Trailing aktifse EMA9 altı çık
+    if position.get("max_profit_pct", 0.0) >= ARM_TRAILING_AT_PROFIT_PCT:
+        if close_price < ema_fast:
+            return True, f"Trailing exit below EMA{PUMP_EMA_FAST}"
+
+    # 3) Fail exit
+    if ema_fast < ema_mid and close_price < ema_mid:
+        return True, f"Fail exit: EMA{PUMP_EMA_FAST}<EMA{PUMP_EMA_MID} and close<EMA{PUMP_EMA_MID}"
+
+    return False, "Hold"
+
+
+def evaluate_pump_long_signal(symbol, df_15m, df_5m, quote_vol_24h):
+    if not ENABLE_PUMP_LONG:
+        return None
+
+    if quote_vol_24h < MIN_QUOTEVOL24H:
+        return None
+
+    df_15m = add_ema_set(df_15m, PUMP_EMA_FAST, PUMP_EMA_MID, PUMP_EMA_TREND)
+    prev_closed, last_closed = get_closed_signal_rows(df_15m)
+    if prev_closed is None:
+        return None
+
+    # Trend
+    if not is_trend_ok(last_closed):
+        return None
+
+    # Cross
+    if not crosses_above(
+        prev_closed["ema_fast"], prev_closed["ema_mid"],
+        last_closed["ema_fast"], last_closed["ema_mid"]
+    ):
+        return None
+
+    # Relative volume
+    cross_candle_volume = calc_cross_candle_quote_volume(last_closed)
+    avg_qv_10 = calc_avg_quote_volume_last_10_closed(df_15m)
+    volume_ratio = (cross_candle_volume / avg_qv_10) if avg_qv_10 > 0 else 0.0
+    if volume_ratio < MIN_VOL_RATIO:
+        return None
+
+    # Compression
+    compression_ok, fast_mid_gap_pct, mid_trend_gap_pct = is_compression_ok(last_closed)
+
+    # Breakout
+    breakout_level = get_breakout_level(df_15m)
+    breakout_ok, near_breakout_ok = is_breakout_ok(last_closed, breakout_level)
+    if not breakout_ok:
+        return None
+
+    # 5m / 15m momentum
+    change_1h = calc_change_from_lookback(df_5m, 12)   # 12x5m = 1h
+    change_4h = calc_change_from_lookback(df_15m, 16)  # 16x15m = 4h
+
+    score = calc_signal_score(
+        last_closed=last_closed,
+        compression_ok=compression_ok,
+        breakout_ok=breakout_ok,
+        near_breakout_ok=near_breakout_ok,
+        volume_ratio=volume_ratio,
+        change_1h=change_1h,
+        change_4h=change_4h,
+    )
+
+    if score < MIN_SIGNAL_SCORE:
+        return None
+
+    setup_type = get_setup_type(compression_ok, breakout_ok, near_breakout_ok)
+    quality = quality_from_score(score)
+
+    return {
+        "mode": "PUMP",
+        "side": "LONG",
+        "entry_reason": "pump_hunter_long_breakout_cross",
+        "ema_fast_len": PUMP_EMA_FAST,
+        "ema_mid_len": PUMP_EMA_MID,
+        "ema_trend_len": PUMP_EMA_TREND,
+        "last_closed": last_closed,
+        "cross_candle_volume": float(cross_candle_volume),
+        "volume_ratio": float(volume_ratio),
+        "breakout_level": breakout_level,
+        "change_1h": float(change_1h),
+        "change_4h": float(change_4h),
+        "signal_score": float(score),
+        "setup_type": setup_type,
+        "quality_tag": quality,
+        "compression_ok": compression_ok,
+        "fast_mid_gap_pct": fast_mid_gap_pct,
+        "mid_trend_gap_pct": mid_trend_gap_pct,
+    }
 
 
 def scan_once():
     global open_long_positions
-    global open_short_positions
 
     print("USDT futures coin listesi alınıyor...", flush=True)
     all_symbols = get_usdt_futures_symbols()
     all_tickers = fetch_all_tickers_map()
-    markets = exchange.markets or exchange.load_markets()
 
     print(f"Taranacak coin sayısı: {len(all_symbols)}", flush=True)
 
@@ -331,30 +391,21 @@ def scan_once():
         try:
             ticker = all_tickers.get(symbol) or {}
             quote_volume_24h = get_quote_volume_24h(ticker)
-            market = markets.get(symbol) or {}
-            market_cap = get_market_cap(symbol, market)
 
-            # Universe'e hiç girmeyen coinleri komple atla
-            passes_any_universe = (
-                (
-                    in_range(quote_volume_24h, PUMP_MIN_QUOTEVOL24H, PUMP_MAX_QUOTEVOL24H)
-                    and passes_marketcap_filter(market_cap, PUMP_MIN_MARKETCAP, PUMP_MAX_MARKETCAP)
-                )
-                or
-                (
-                    in_range(quote_volume_24h, DIP_MIN_QUOTEVOL24H, DIP_MAX_QUOTEVOL24H)
-                    and passes_marketcap_filter(market_cap, DIP_MIN_MARKETCAP, DIP_MAX_MARKETCAP)
-                )
-            )
-
-            if not passes_any_universe:
+            if quote_volume_24h < MIN_QUOTEVOL24H:
                 continue
 
-            df = fetch_ohlcv_df(symbol, timeframe=TIMEFRAME, limit=CANDLE_LIMIT)
-            if len(df) < max(PUMP_EMA_TREND, DIP_EMA_TREND) + 5:
+            # 15m ana veri
+            df_15m = fetch_ohlcv_df(symbol, timeframe=TIMEFRAME, limit=CANDLE_LIMIT)
+            if len(df_15m) < max(PUMP_EMA_TREND, BREAKOUT_LOOKBACK) + 10:
                 continue
 
-            prev_closed, last_closed_raw = get_closed_signal_rows(df)
+            # 5m momentum verisi
+            df_5m = fetch_ohlcv_df(symbol, timeframe=MOMENTUM_TIMEFRAME, limit=max(80, CANDLE_LIMIT // 2))
+            if len(df_5m) < 30:
+                continue
+
+            prev_closed, last_closed_raw = get_closed_signal_rows(df_15m)
             if prev_closed is None or last_closed_raw is None:
                 continue
 
@@ -365,100 +416,103 @@ def scan_once():
                 tz=timezone.utc,
             )
             cross_price = current_price
-            cross_candle_volume = calc_cross_candle_quote_volume(last_closed_raw)
-            avg_qv_10 = calc_avg_quote_volume_last_10_closed(df)
-            volume_ratio = (cross_candle_volume / avg_qv_10) if avg_qv_10 > 0 else 0.0
 
-            if symbol not in open_long_positions and symbol not in open_short_positions:
-                pump_signal = evaluate_pump_signal(
+            # Açık pozisyon yoksa yeni sinyal ara
+            if symbol not in open_long_positions:
+                signal = evaluate_pump_long_signal(
                     symbol=symbol,
-                    df=df,
+                    df_15m=df_15m,
+                    df_5m=df_5m,
                     quote_vol_24h=quote_volume_24h,
-                    market_cap=market_cap,
-                    volume_ratio=volume_ratio,
                 )
-                dip_signal = evaluate_dip_signal(
-                    symbol=symbol,
-                    df=df,
-                    quote_vol_24h=quote_volume_24h,
-                    market_cap=market_cap,
-                    volume_ratio=volume_ratio,
-                )
-
-                signal = pump_signal or dip_signal
 
                 if signal:
+                    in_cooldown, cooldown_until_prev = is_symbol_in_cooldown(symbol, "LONG", current_ts)
+                    if in_cooldown:
+                        print(f"Cooldown aktif, atlanıyor: {symbol} LONG | until={cooldown_until_prev}", flush=True)
+                        time.sleep(0.03)
+                        continue
+
                     signal_last = signal["last_closed"]
                     ema_distance = calc_ema_distance(signal_last)
+                    cooldown_until = compute_cooldown_until(current_ts, SIGNAL_COOLDOWN_MINUTES)
 
                     trade_id = create_trade(
                         symbol=symbol,
-                        side=signal["side"],
-                        mode=signal["mode"],
+                        side="LONG",
+                        mode="PUMP",
                         entry_price=current_price,
                         entry_time=current_ts,
                         timeframe=TIMEFRAME,
                         cross_time=cross_time,
                         cross_price=cross_price,
                         quote_volume_24h=float(quote_volume_24h),
-                        cross_candle_volume=float(cross_candle_volume),
+                        cross_candle_volume=signal["cross_candle_volume"],
                         ema_distance=float(ema_distance),
-                        volume_ratio=float(volume_ratio),
-                        market_cap=market_cap,
+                        volume_ratio=signal["volume_ratio"],
+                        market_cap=None,
                         ema_fast=signal["ema_fast_len"],
                         ema_mid=signal["ema_mid_len"],
                         ema_trend=signal["ema_trend_len"],
                         entry_reason=signal["entry_reason"],
+                        signal_score=signal["signal_score"],
+                        setup_type=signal["setup_type"],
+                        quality_tag=signal["quality_tag"],
+                        breakout_level=signal["breakout_level"],
+                        change_1h=signal["change_1h"],
+                        change_4h=signal["change_4h"],
+                        cooldown_until=cooldown_until,
                     )
 
                     pos = {
                         "trade_id": trade_id,
-                        "side": signal["side"],
-                        "mode": signal["mode"],
+                        "side": "LONG",
+                        "mode": "PUMP",
                         "entry_price": current_price,
                         "entry_time": current_ts,
                         "max_profit_pct": 0.0,
                         "max_drawdown_pct": 0.0,
-                        "ema_fast_len": signal["ema_fast_len"],
-                        "ema_mid_len": signal["ema_mid_len"],
-                        "ema_trend_len": signal["ema_trend_len"],
+                        "cooldown_until": cooldown_until,
+                        "signal_score": signal["signal_score"],
+                        "quality_tag": signal["quality_tag"],
+                        "breakout_level": signal["breakout_level"],
                     }
+                    open_long_positions[symbol] = pos
 
-                    if signal["side"] == "LONG":
-                        open_long_positions[symbol] = pos
-                    else:
-                        open_short_positions[symbol] = pos
-
-                    msg = format_entry_signal(
+                    msg = format_signal_message(
                         symbol=symbol,
-                        side=signal["side"],
-                        mode=signal["mode"],
-                        price=current_price,
-                        ema_fast_val=float(signal_last["ema_fast"]),
-                        ema_mid_val=float(signal_last["ema_mid"]),
-                        ema_trend_val=float(signal_last["ema_trend"]),
-                        ema_fast_len=signal["ema_fast_len"],
-                        ema_mid_len=signal["ema_mid_len"],
-                        ema_trend_len=signal["ema_trend_len"],
-                        vol_ratio=float(volume_ratio),
-                        quote_vol_24h=float(quote_volume_24h),
+                        price=round(current_price, 8),
+                        side="LONG",
+                        timeframe=TIMEFRAME,
+                        score=signal["signal_score"],
+                        quality=signal["quality_tag"],
+                        setup_type=signal["setup_type"],
+                        volume_ratio=signal["volume_ratio"],
+                        breakout_level=round(signal["breakout_level"], 8) if signal["breakout_level"] else "-",
+                        change_1h=signal["change_1h"],
+                        change_4h=signal["change_4h"],
+                        ema_fast=signal["ema_fast_len"],
+                        ema_mid=signal["ema_mid_len"],
+                        ema_trend=signal["ema_trend_len"],
                     )
 
                     print(
-                        f"{signal['mode']} {signal['side']} SIGNAL: {symbol} | "
+                        f"PUMP LONG SIGNAL: {symbol} | "
+                        f"score={signal['signal_score']:.1f} | "
+                        f"quality={signal['quality_tag']} | "
                         f"qv24h={quote_volume_24h:.2f} | "
-                        f"cross_vol={cross_candle_volume:.2f} | "
-                        f"ema_set={signal['ema_fast_len']}/{signal['ema_mid_len']}/{signal['ema_trend_len']} | "
-                        f"ema_dist={ema_distance:.4f}% | vol_ratio={volume_ratio:.2f}",
+                        f"vol_ratio={signal['volume_ratio']:.2f} | "
+                        f"chg1h={signal['change_1h']:.2f}% | "
+                        f"chg4h={signal['change_4h']:.2f}%",
                         flush=True,
                     )
-                    send_telegram_message(msg)
+                    send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg)
 
+            # Açık pozisyon varsa yönet
             elif symbol in open_long_positions:
                 pos = open_long_positions[symbol]
 
                 live_pnl, max_profit_pct, max_drawdown_pct, duration_minutes, rr_ratio = calc_live_metrics(
-                    side="LONG",
                     entry_price=pos["entry_price"],
                     current_price=current_price,
                     position=pos,
@@ -476,7 +530,7 @@ def scan_once():
                     rr_ratio=rr_ratio,
                 )
 
-                exit_now, reason = should_exit_trade(pos, df)
+                exit_now, reason = should_exit_trade(pos, df_15m)
                 if exit_now:
                     close_trade(
                         trade_id=pos["trade_id"],
@@ -490,67 +544,25 @@ def scan_once():
                         rr_ratio=rr_ratio,
                     )
 
-                    msg = format_exit_signal(
-                        symbol=symbol,
-                        side="LONG",
-                        mode=pos["mode"],
-                        price=current_price,
-                        reason=reason,
-                        pnl_pct=live_pnl,
+                    exit_msg = (
+                        f"🔴 <b>PUMP HUNTER EXIT</b>\n\n"
+                        f"<b>Coin:</b> {symbol}\n"
+                        f"<b>Side:</b> LONG\n"
+                        f"<b>Mode:</b> PUMP\n"
+                        f"<b>Exit Price:</b> {current_price:.8f}\n"
+                        f"<b>PnL:</b> {live_pnl:.2f}%\n"
+                        f"<b>Reason:</b> {reason}"
                     )
 
-                    print(f"{pos['mode']} LONG EXIT: {symbol} | PnL: {live_pnl:.2f}%", flush=True)
-                    send_telegram_message(msg)
+                    print(
+                        f"PUMP LONG EXIT: {symbol} | "
+                        f"PnL={live_pnl:.2f}% | "
+                        f"MaxProfit={max_profit_pct:.2f}% | "
+                        f"Reason={reason}",
+                        flush=True,
+                    )
+                    send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, exit_msg)
                     del open_long_positions[symbol]
-
-            elif symbol in open_short_positions:
-                pos = open_short_positions[symbol]
-
-                live_pnl, max_profit_pct, max_drawdown_pct, duration_minutes, rr_ratio = calc_live_metrics(
-                    side="SHORT",
-                    entry_price=pos["entry_price"],
-                    current_price=current_price,
-                    position=pos,
-                    entry_time=pos["entry_time"],
-                )
-
-                pos["max_profit_pct"] = max_profit_pct
-                pos["max_drawdown_pct"] = max_drawdown_pct
-
-                update_trade_metrics(
-                    trade_id=pos["trade_id"],
-                    max_profit_pct=max_profit_pct,
-                    max_drawdown_pct=max_drawdown_pct,
-                    duration_minutes=duration_minutes,
-                    rr_ratio=rr_ratio,
-                )
-
-                exit_now, reason = should_exit_trade(pos, df)
-                if exit_now:
-                    close_trade(
-                        trade_id=pos["trade_id"],
-                        exit_price=current_price,
-                        exit_time=current_ts,
-                        exit_reason=reason,
-                        pnl_pct=live_pnl,
-                        max_profit_pct=max_profit_pct,
-                        max_drawdown_pct=max_drawdown_pct,
-                        duration_minutes=duration_minutes,
-                        rr_ratio=rr_ratio,
-                    )
-
-                    msg = format_exit_signal(
-                        symbol=symbol,
-                        side="SHORT",
-                        mode=pos["mode"],
-                        price=current_price,
-                        reason=reason,
-                        pnl_pct=live_pnl,
-                    )
-
-                    print(f"{pos['mode']} SHORT EXIT: {symbol} | PnL: {live_pnl:.2f}%", flush=True)
-                    send_telegram_message(msg)
-                    del open_short_positions[symbol]
 
             time.sleep(0.03)
 
@@ -560,8 +572,13 @@ def scan_once():
 
 if __name__ == "__main__":
     init_db()
-    print("EMA Scanner başlatıldı...", flush=True)
-    send_telegram_message("🚀 EMA Scanner worker started")
+    print("Pump Hunter v2 worker başlatıldı...", flush=True)
+
+    send_telegram_message(
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID,
+        "🚀 <b>Pump Hunter v2 worker started</b>"
+    )
 
     while True:
         try:
