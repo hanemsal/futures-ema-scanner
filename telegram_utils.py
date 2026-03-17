@@ -1,70 +1,72 @@
 import requests
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TIMEFRAME
+from datetime import datetime
 
 
-def send_telegram_message(text: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram ayarlı değil, mesaj atlanıyor.", flush=True)
+def send_telegram_message(bot_token: str, chat_id: str, message: str):
+    if not bot_token or not chat_id:
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
+        "chat_id": chat_id,
+        "text": message,
         "parse_mode": "HTML",
+        "disable_web_page_preview": True,
     }
 
     try:
-        response = requests.post(url, data=payload, timeout=15)
-        print("Telegram response:", response.status_code, response.text, flush=True)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print("Telegram gönderim hatası:", e, flush=True)
+        print("Telegram send error:", e)
 
 
-def format_entry_signal(
-    symbol: str,
-    side: str,
-    mode: str,
-    price: float,
-    ema_fast_val: float,
-    ema_mid_val: float,
-    ema_trend_val: float,
-    ema_fast_len: int,
-    ema_mid_len: int,
-    ema_trend_len: int,
-    vol_ratio: float,
-    quote_vol_24h: float,
+def format_signal_message(
+    symbol,
+    price,
+    side,
+    timeframe,
+    score,
+    quality,
+    setup_type,
+    volume_ratio,
+    breakout_level,
+    change_1h,
+    change_4h,
+    ema_fast,
+    ema_mid,
+    ema_trend,
 ):
-    icon = "🟢" if side == "LONG" else "🔻"
-    return (
-        f"{icon} <b>{side} SIGNAL</b>\n\n"
-        f"<b>Coin:</b> {symbol}\n"
-        f"<b>Mode:</b> {mode}\n"
-        f"<b>Price:</b> {price:.6f}\n"
-        f"<b>TF:</b> {TIMEFRAME}\n\n"
-        f"<b>EMA Fast ({ema_fast_len}):</b> {ema_fast_val:.6f}\n"
-        f"<b>EMA Mid ({ema_mid_len}):</b> {ema_mid_val:.6f}\n"
-        f"<b>EMA Trend ({ema_trend_len}):</b> {ema_trend_val:.6f}\n"
-        f"<b>Vol Ratio:</b> {vol_ratio:.2f}\n"
-        f"<b>QuoteVol 24h:</b> {quote_vol_24h:.2f}"
-    )
 
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-def format_exit_signal(
-    symbol: str,
-    side: str,
-    mode: str,
-    price: float,
-    reason: str,
-    pnl_pct: float = 0.0,
-):
-    icon = "🔴" if side == "LONG" else "⚪"
-    return (
-        f"{icon} <b>{side} EXIT</b>\n\n"
-        f"<b>Coin:</b> {symbol}\n"
-        f"<b>Mode:</b> {mode}\n"
-        f"<b>Exit Price:</b> {price:.6f}\n"
-        f"<b>Reason:</b> {reason}\n"
-        f"<b>PnL:</b> {pnl_pct:.2f}%"
-    )
+    message = f"""
+🚀 <b>PUMP HUNTER SIGNAL</b>
+
+<b>Coin:</b> {symbol}
+<b>Side:</b> {side}
+<b>Price:</b> {price}
+
+<b>Quality:</b> {quality}
+<b>Score:</b> {score:.1f}
+
+<b>Setup:</b> {setup_type}
+
+<b>Volume Ratio:</b> {volume_ratio:.2f}
+
+<b>Breakout Level:</b> {breakout_level}
+
+<b>EMA Set:</b> {ema_fast} / {ema_mid} / {ema_trend}
+
+<b>Momentum</b>
+1h Change: {change_1h:.2f}%
+4h Change: {change_4h:.2f}%
+
+<b>Timeframe:</b> {timeframe}
+
+<b>Time:</b> {now}
+
+━━━━━━━━━━━━━━━━
+"""
+
+    return message
