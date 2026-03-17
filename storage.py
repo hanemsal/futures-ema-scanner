@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -17,7 +17,7 @@ class Trade(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(50), index=True)
-    side = Column(String(10), index=True)  # LONG / SHORT
+    side = Column(String(10), index=True)   # LONG / SHORT
     mode = Column(String(20), index=True, nullable=True)  # PUMP / DIP
 
     entry_price = Column(Float, nullable=False)
@@ -50,6 +50,15 @@ class Trade(Base):
     max_drawdown_pct = Column(Float, nullable=True, default=0.0)
     duration_minutes = Column(Float, nullable=True, default=0.0)
     rr_ratio = Column(Float, nullable=True, default=0.0)
+
+    # v2 alanları
+    signal_score = Column(Float, nullable=True, default=0.0)
+    setup_type = Column(String(100), nullable=True)
+    quality_tag = Column(String(20), nullable=True)
+    breakout_level = Column(Float, nullable=True)
+    change_1h = Column(Float, nullable=True, default=0.0)
+    change_4h = Column(Float, nullable=True, default=0.0)
+    cooldown_until = Column(DateTime, nullable=True)
 
 
 def format_duration_from_minutes(minutes):
@@ -85,6 +94,14 @@ def _add_missing_columns():
         "ema_trend": "INTEGER NULL",
         "entry_reason": "VARCHAR(255) NULL",
         "exit_reason": "VARCHAR(255) NULL",
+        # v2
+        "signal_score": "FLOAT NULL DEFAULT 0.0",
+        "setup_type": "VARCHAR(100) NULL",
+        "quality_tag": "VARCHAR(20) NULL",
+        "breakout_level": "FLOAT NULL",
+        "change_1h": "FLOAT NULL DEFAULT 0.0",
+        "change_4h": "FLOAT NULL DEFAULT 0.0",
+        "cooldown_until": "TIMESTAMP NULL",
     }
 
     with engine.begin() as conn:
@@ -116,6 +133,13 @@ def create_trade(
     ema_mid=None,
     ema_trend=None,
     entry_reason=None,
+    signal_score=0.0,
+    setup_type=None,
+    quality_tag=None,
+    breakout_level=None,
+    change_1h=0.0,
+    change_4h=0.0,
+    cooldown_until=None,
 ):
     session = SessionLocal()
     try:
@@ -142,6 +166,13 @@ def create_trade(
             max_drawdown_pct=0.0,
             duration_minutes=0.0,
             rr_ratio=0.0,
+            signal_score=signal_score,
+            setup_type=setup_type,
+            quality_tag=quality_tag,
+            breakout_level=breakout_level,
+            change_1h=change_1h,
+            change_4h=change_4h,
+            cooldown_until=cooldown_until,
         )
         session.add(trade)
         session.commit()
@@ -196,6 +227,110 @@ def close_trade(
         session.commit()
     finally:
         session.close()
+
+
+def get_open_trade_by_symbol_side(symbol: str, side: str):
+    session = SessionLocal()
+    try:
+        return (
+            session.query(Trade)
+            .filter(
+                Trade.symbol == symbol,
+                Trade.side == side,
+                Trade.status == "OPEN",
+            )
+            .order_by(Trade.id.desc())
+            .first()
+        )
+    finally:
+        session.close()
+
+
+def has_open_trade(symbol: str, side: str | None = None) -> bool:
+    session = SessionLocal()
+    try:
+        q = session.query(Trade).filter(
+            Trade.symbol == symbol,
+            Trade.status == "OPEN",
+        )
+        if side is not None:
+            q = q.filter(Trade.side == side)
+        return q.first() is not None
+    finally:
+        session.close()
+
+
+def get_last_trade(symbol: str, side: str | None = None, mode: str | None = None):
+    session = SessionLocal()
+    try:
+        q = session.query(Trade).filter(Trade.symbol == symbol)
+
+        if side is not None:
+            q = q.filter(Trade.side == side)
+        if mode is not None:
+            q = q.filter(Trade.mode == mode)
+
+        return q.order_by(Trade.id.desc()).first()
+    finally:
+        session.close()
+
+
+def is_symbol_in_cooldown(symbol: str, side: str, now_utc: datetime | None = None) -> tuple[bool, datetime | None]:
+    """
+    Aynı symbol + side için cooldown aktif mi?
+    Öncelik:
+    1) açık trade varsa zaten tekrar açma
+    2) son trade cooldown_until içindeyse tekrar açma
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+
+    session = SessionLocal()
+    try:
+        open_trade = (
+            session.query(Trade)
+            .filter(
+                Trade.symbol == symbol,
+                Trade.side == side,
+                Trade.status == "OPEN",
+            )
+            .order_by(Trade.id.desc())
+            .first()
+        )
+        if open_trade:
+            return True, open_trade.cooldown_until
+
+        last_trade = (
+            session.query(Trade)
+            .filter(
+                Trade.symbol == symbol,
+                Trade.side == side,
+            )
+            .order_by(Trade.id.desc())
+            .first()
+        )
+
+        if not last_trade:
+            return False, None
+
+        if last_trade.cooldown_until is None:
+            return False, None
+
+        cooldown_until = last_trade.cooldown_until
+        if cooldown_until.tzinfo is None:
+            cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
+
+        if cooldown_until > now_utc:
+            return True, cooldown_until
+
+        return False, cooldown_until
+    finally:
+        session.close()
+
+
+def compute_cooldown_until(entry_time: datetime, cooldown_minutes: int) -> datetime:
+    if entry_time.tzinfo is None:
+        entry_time = entry_time.replace(tzinfo=timezone.utc)
+    return entry_time + timedelta(minutes=cooldown_minutes)
 
 
 def get_dashboard_stats():
@@ -293,7 +428,6 @@ def get_dashboard_stats():
         recent_trades = (
             session.query(Trade)
             .order_by(Trade.id.desc())
-            .limit(200)
             .all()
         )
 
