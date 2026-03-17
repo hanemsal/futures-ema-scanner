@@ -1,5 +1,5 @@
 from flask import Flask, render_template_string, request
-from sqlalchemy import desc, func
+from sqlalchemy import desc
 from storage import SessionLocal, Signal
 
 app = Flask(__name__)
@@ -79,7 +79,8 @@ HTML = """
 
         .filters input,
         .filters select,
-        .filters button {
+        .filters button,
+        .filters a {
             width: 100%;
             padding: 10px 12px;
             border-radius: 10px;
@@ -633,14 +634,15 @@ def index():
         total = len(signals)
         open_count = len([s for s in signals if s.status == "OPEN"])
         closed_count = len([s for s in signals if s.status == "CLOSED"])
-        wins = len([s for s in signals if s.pnl is not None and s.pnl > 0])
-        losses = len([s for s in signals if s.pnl is not None and s.pnl < 0])
+        wins = len([s for s in signals if s.status == "CLOSED" and s.pnl is not None and s.pnl > 0])
+        losses = len([s for s in signals if s.status == "CLOSED" and s.pnl is not None and s.pnl < 0])
+
         long_count = len([s for s in signals if s.side == "LONG"])
         short_count = len([s for s in signals if s.side == "SHORT"])
         cross_count = len([s for s in signals if s.entry_type == "cross"])
         bounce_count = len([s for s in signals if s.entry_type == "bounce"])
 
-        pnl_values = [s.pnl for s in signals if s.pnl is not None]
+        pnl_values = [s.pnl for s in signals if s.status == "CLOSED" and s.pnl is not None]
         total_pnl = round(sum(pnl_values), 2) if pnl_values else 0.0
         avg_pnl = round(total_pnl / len(pnl_values), 2) if pnl_values else 0.0
         win_rate = round((wins / closed_count) * 100, 2) if closed_count else 0.0
