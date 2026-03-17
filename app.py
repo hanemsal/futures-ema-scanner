@@ -29,6 +29,8 @@ from config import (
     MIN_SIGNAL_SCORE,
     A_GRADE_SCORE,
     ARM_TRAILING_AT_PROFIT_PCT,
+    TRAILING_GIVEBACK_PCT,
+    HARD_STOP_PCT,
     HARD_TP1_PCT,
     HARD_TP2_PCT,
 )
@@ -78,11 +80,10 @@ def get_usdt_futures_symbols():
 
 def fetch_ohlcv_df(symbol: str, timeframe: str, limit: int):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(
+    return pd.DataFrame(
         ohlcv,
         columns=["timestamp", "open", "high", "low", "close", "volume"],
     )
-    return df
 
 
 def fetch_all_tickers_map():
@@ -103,9 +104,7 @@ def get_quote_volume_24h(ticker: dict) -> float:
 def get_closed_signal_rows(df: pd.DataFrame):
     if len(df) < 3:
         return None, None
-    prev_closed = df.iloc[-3]
-    last_closed = df.iloc[-2]
-    return prev_closed, last_closed
+    return df.iloc[-3], df.iloc[-2]
 
 
 def crosses_above(prev_fast, prev_mid, curr_fast, curr_mid) -> bool:
@@ -146,10 +145,19 @@ def calc_change_from_lookback(df: pd.DataFrame, candles_back: int) -> float:
     return pct_change(float(last_closed["close"]), float(ref["close"]))
 
 
+def calc_ema55_slope_positive(df: pd.DataFrame) -> bool:
+    if len(df) < 5:
+        return False
+    last_closed = df.iloc[-2]
+    prev3 = df.iloc[-5]
+    return float(last_closed["ema_trend"]) > float(prev3["ema_trend"])
+
+
 def is_trend_ok(last_closed) -> bool:
     return (
-        float(last_closed["ema_mid"]) > float(last_closed["ema_trend"])
-        and float(last_closed["close"]) > float(last_closed["ema_trend"])
+        float(last_closed["ema_fast"]) > float(last_closed["ema_mid"])
+        and float(last_closed["ema_mid"]) > float(last_closed["ema_trend"])
+        and float(last_closed["close"]) > float(last_closed["ema_mid"])
     )
 
 
@@ -171,11 +179,9 @@ def is_compression_ok(last_closed) -> tuple[bool, float, float]:
 def get_breakout_level(df: pd.DataFrame) -> float | None:
     if len(df) < BREAKOUT_LOOKBACK + 3:
         return None
-
     window = df.iloc[-(BREAKOUT_LOOKBACK + 2):-2]
     if window.empty:
         return None
-
     return float(window["high"].max())
 
 
@@ -189,13 +195,13 @@ def is_breakout_ok(last_closed, breakout_level: float | None) -> tuple[bool, boo
     return breakout_ok, near_breakout_ok
 
 
-def get_setup_type(compression_ok: bool, breakout_ok: bool, near_breakout_ok: bool) -> str:
-    if compression_ok and breakout_ok:
+def get_setup_type(compression_ok: bool, breakout_ok: bool, near_breakout_ok: bool, ema55_slope_ok: bool) -> str:
+    if compression_ok and breakout_ok and ema55_slope_ok:
         return "Compression Breakout"
+    if breakout_ok and ema55_slope_ok:
+        return "Breakout Trend"
     if compression_ok and near_breakout_ok:
         return "Compression Near Breakout"
-    if breakout_ok:
-        return "Breakout"
     return "Trend Continuation"
 
 
@@ -215,15 +221,16 @@ def calc_signal_score(
     volume_ratio: float,
     change_1h: float,
     change_4h: float,
+    ema55_slope_ok: bool,
 ) -> float:
     score = 0.0
 
     if float(last_closed["ema_mid"]) > float(last_closed["ema_trend"]):
-        score += 10
+        score += 8
     if float(last_closed["ema_fast"]) > float(last_closed["ema_mid"]):
-        score += 5
-    if float(last_closed["close"]) > float(last_closed["ema_trend"]):
-        score += 5
+        score += 6
+    if float(last_closed["close"]) > float(last_closed["ema_mid"]):
+        score += 6
 
     if compression_ok:
         score += 20
@@ -231,17 +238,20 @@ def calc_signal_score(
     if breakout_ok:
         score += 25
     elif near_breakout_ok:
-        score += 12
+        score += 10
 
     if volume_ratio >= STRONG_VOL_RATIO:
         score += 20
     elif volume_ratio >= MIN_VOL_RATIO:
-        score += 14
+        score += 15
+
+    if ema55_slope_ok:
+        score += 10
 
     if change_4h >= MIN_CHANGE_4H_PRIORITY:
-        score += 10
-    elif change_4h > 0:
         score += 5
+    elif change_4h > 0:
+        score += 3
 
     if change_1h >= MIN_CHANGE_1H_PRIORITY:
         score += 5
@@ -279,15 +289,23 @@ def should_exit_trade(position: dict, raw_df_15m: pd.DataFrame):
     ema_fast = float(last_closed["ema_fast"])
     ema_mid = float(last_closed["ema_mid"])
 
-    if position.get("max_profit_pct", 0.0) >= HARD_TP2_PCT:
+    live_pnl = position.get("live_pnl", 0.0)
+    max_profit_pct = position.get("max_profit_pct", 0.0)
+
+    if live_pnl <= HARD_STOP_PCT:
+        return True, f"Hard stop hit ({HARD_STOP_PCT:.1f}%)"
+
+    if max_profit_pct >= HARD_TP2_PCT:
         return True, f"Hard TP2 reached ({HARD_TP2_PCT:.1f}%)"
 
-    if position.get("max_profit_pct", 0.0) >= ARM_TRAILING_AT_PROFIT_PCT:
-        if close_price < ema_fast:
-            return True, f"Trailing exit below EMA{PUMP_EMA_FAST}"
+    if max_profit_pct >= ARM_TRAILING_AT_PROFIT_PCT:
+        giveback = max_profit_pct - live_pnl
+        if giveback >= TRAILING_GIVEBACK_PCT:
+            return True, f"Trailing giveback {giveback:.2f}%"
 
-    if ema_fast < ema_mid and close_price < ema_mid:
-        return True, f"Fail exit: EMA{PUMP_EMA_FAST}<EMA{PUMP_EMA_MID} and close<EMA{PUMP_EMA_MID}"
+    if max_profit_pct < ARM_TRAILING_AT_PROFIT_PCT:
+        if ema_fast < ema_mid and close_price < ema_mid:
+            return True, f"Fail exit: EMA{PUMP_EMA_FAST}<EMA{PUMP_EMA_MID} and close<EMA{PUMP_EMA_MID}"
 
     return False, "Hold"
 
@@ -313,6 +331,10 @@ def evaluate_pump_long_signal(symbol, df_15m, df_5m, quote_vol_24h):
     ):
         return None
 
+    ema55_slope_ok = calc_ema55_slope_positive(df_15m)
+    if not ema55_slope_ok:
+        return None
+
     cross_candle_volume = calc_cross_candle_quote_volume(last_closed)
     avg_qv_10 = calc_avg_quote_volume_last_10_closed(df_15m)
     volume_ratio = (cross_candle_volume / avg_qv_10) if avg_qv_10 > 0 else 0.0
@@ -320,6 +342,8 @@ def evaluate_pump_long_signal(symbol, df_15m, df_5m, quote_vol_24h):
         return None
 
     compression_ok, fast_mid_gap_pct, mid_trend_gap_pct = is_compression_ok(last_closed)
+    if not compression_ok:
+        return None
 
     breakout_level = get_breakout_level(df_15m)
     breakout_ok, near_breakout_ok = is_breakout_ok(last_closed, breakout_level)
@@ -337,12 +361,13 @@ def evaluate_pump_long_signal(symbol, df_15m, df_5m, quote_vol_24h):
         volume_ratio=volume_ratio,
         change_1h=change_1h,
         change_4h=change_4h,
+        ema55_slope_ok=ema55_slope_ok,
     )
 
     if score < MIN_SIGNAL_SCORE:
         return None
 
-    setup_type = get_setup_type(compression_ok, breakout_ok, near_breakout_ok)
+    setup_type = get_setup_type(compression_ok, breakout_ok, near_breakout_ok, ema55_slope_ok)
     quality = quality_from_score(score)
 
     return {
@@ -361,9 +386,6 @@ def evaluate_pump_long_signal(symbol, df_15m, df_5m, quote_vol_24h):
         "signal_score": float(score),
         "setup_type": setup_type,
         "quality_tag": quality,
-        "compression_ok": compression_ok,
-        "fast_mid_gap_pct": fast_mid_gap_pct,
-        "mid_trend_gap_pct": mid_trend_gap_pct,
     }
 
 
@@ -462,6 +484,7 @@ def scan_once():
                         "signal_score": signal["signal_score"],
                         "quality_tag": signal["quality_tag"],
                         "breakout_level": signal["breakout_level"],
+                        "live_pnl": 0.0,
                     }
                     open_long_positions[symbol] = pos
 
@@ -504,6 +527,7 @@ def scan_once():
                     entry_time=pos["entry_time"],
                 )
 
+                pos["live_pnl"] = live_pnl
                 pos["max_profit_pct"] = max_profit_pct
                 pos["max_drawdown_pct"] = max_drawdown_pct
 
@@ -556,12 +580,12 @@ def scan_once():
 
 if __name__ == "__main__":
     init_db()
-    print("Pump Hunter v2 worker başlatıldı...", flush=True)
+    print("Pump Hunter v2.1 worker başlatıldı...", flush=True)
 
     send_telegram_message(
         TELEGRAM_BOT_TOKEN,
         TELEGRAM_CHAT_ID,
-        "🚀 <b>Pump Hunter v2 worker started</b>"
+        "🚀 <b>Pump Hunter v2.1 worker started</b>"
     )
 
     while True:
