@@ -59,6 +59,33 @@ def color_class_by_rate(value):
     return "neg"
 
 
+def score_class(score):
+    if score is None:
+        return ""
+    try:
+        score = float(score)
+    except Exception:
+        return ""
+    if score >= 90:
+        return "score-super"
+    if score >= 80:
+        return "score-a"
+    if score >= 65:
+        return "score-b"
+    return "score-c"
+
+
+def quality_class(quality):
+    if not quality:
+        return ""
+    q = str(quality).upper()
+    if q == "A":
+        return "score-a"
+    if q == "B":
+        return "score-b"
+    return "score-c"
+
+
 def safe_upper(value, default="ALL"):
     if value is None:
         return default
@@ -119,7 +146,7 @@ def dashboard(
     html = f"""
     <html>
     <head>
-        <title>EMA Scanner Dashboard</title>
+        <title>Pump Hunter Dashboard</title>
         <style>
         body {{
             background:#0f0f0f;
@@ -290,11 +317,27 @@ def dashboard(
             font-size:12px;
             color:#ddd;
         }}
+        .score-super {{
+            color:#c084fc;
+            font-weight:bold;
+        }}
+        .score-a {{
+            color:#22c55e;
+            font-weight:bold;
+        }}
+        .score-b {{
+            color:#eab308;
+            font-weight:bold;
+        }}
+        .score-c {{
+            color:#ef4444;
+            font-weight:bold;
+        }}
         </style>
     </head>
     <body>
 
-    <h1>🚀 EMA Scanner Dashboard</h1>
+    <h1>🚀 Pump Hunter Dashboard</h1>
 
     <form method="get" action="/" class="toolbar">
         <div class="filter-group">
@@ -467,6 +510,9 @@ def dashboard(
         <th>Symbol</th>
         <th>Side</th>
         <th>Mode</th>
+        <th>Score</th>
+        <th>Quality</th>
+        <th>Setup</th>
         <th>Cross Time</th>
         <th>Cross Price</th>
         <th>Entry</th>
@@ -476,6 +522,9 @@ def dashboard(
         <th>MarketCap</th>
         <th>Cross Candle Vol</th>
         <th>Vol Ratio</th>
+        <th>Breakout</th>
+        <th>1h Change</th>
+        <th>4h Change</th>
         <th>EMA Set</th>
         <th>EMA Distance</th>
         <th>PnL</th>
@@ -483,6 +532,7 @@ def dashboard(
         <th>Max Profit</th>
         <th>Max Drawdown</th>
         <th>RR</th>
+        <th>Cooldown Until</th>
         <th>Entry Reason</th>
         <th>Exit Reason</th>
     </tr>
@@ -504,6 +554,11 @@ def dashboard(
         elif (t.status or "").upper() == "CLOSED":
             status_class = "neg"
 
+        score_css = score_class(t.signal_score)
+        quality_css = quality_class(t.quality_tag)
+        chg1_css = color_class_by_value(t.change_1h)
+        chg4_css = color_class_by_value(t.change_4h)
+
         html += f"""
         <tr>
             <td>{t.id}</td>
@@ -511,6 +566,9 @@ def dashboard(
             <td>{t.symbol}</td>
             <td>{t.side}</td>
             <td>{t.mode or '-'}</td>
+            <td class="{score_css}">{fmt_num(t.signal_score, 1)}</td>
+            <td class="{quality_css}">{t.quality_tag or '-'}</td>
+            <td>{t.setup_type or '-'}</td>
             <td>{fmt_dt(t.cross_time)}</td>
             <td>{fmt_num(t.cross_price, 6)}</td>
             <td>{fmt_num(t.entry_price, 6)}</td>
@@ -520,6 +578,9 @@ def dashboard(
             <td>{fmt_big(t.market_cap)}</td>
             <td>{fmt_big(t.cross_candle_volume)}</td>
             <td>{fmt_num(t.volume_ratio, 2)}</td>
+            <td>{fmt_num(t.breakout_level, 6) if t.breakout_level is not None else '-'}</td>
+            <td class="{chg1_css}">{fmt_pct(t.change_1h, 2)}</td>
+            <td class="{chg4_css}">{fmt_pct(t.change_4h, 2)}</td>
             <td>{ema_set}</td>
             <td>{fmt_pct(t.ema_distance, 4)}</td>
             <td class="{pnl_class}">{fmt_pct(t.pnl_pct, 2) if t.pnl_pct is not None else '-'}</td>
@@ -527,6 +588,7 @@ def dashboard(
             <td class="{max_profit_class}">{fmt_pct(t.max_profit_pct, 2)}</td>
             <td class="{max_drawdown_class}">{fmt_pct(t.max_drawdown_pct, 2)}</td>
             <td class="{rr_class}">{fmt_num(t.rr_ratio, 2)}</td>
+            <td>{fmt_dt(t.cooldown_until)}</td>
             <td>{t.entry_reason or '-'}</td>
             <td>{t.exit_reason or '-'}</td>
         </tr>
