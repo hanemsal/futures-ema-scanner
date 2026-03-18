@@ -1,11 +1,15 @@
 from flask import Flask, render_template_string, request, Response
 from sqlalchemy import desc
 from io import StringIO
+from datetime import timezone
+from zoneinfo import ZoneInfo
 import csv
 
 from storage import SessionLocal, Signal
 
 app = Flask(__name__)
+
+ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 
 HTML = """
 <!DOCTYPE html>
@@ -591,9 +595,9 @@ HTML = """
                         </td>
                         <td class="left">{{ s.entry_reason or '-' }}</td>
                         <td class="left">{{ s.exit_reason or '-' }}</td>
-                        <td>{{ s.cooldown_until.strftime('%Y-%m-%d %H:%M') if s.cooldown_until else '-' }}</td>
-                        <td>{{ s.created_at.strftime('%Y-%m-%d %H:%M') if s.created_at else '-' }}</td>
-                        <td>{{ s.exit_time.strftime('%Y-%m-%d %H:%M') if s.exit_time else '-' }}</td>
+                        <td>{{ s.cooldown_until_local.strftime('%Y-%m-%d %H:%M') if s.cooldown_until_local else '-' }}</td>
+                        <td>{{ s.created_at_local.strftime('%Y-%m-%d %H:%M') if s.created_at_local else '-' }}</td>
+                        <td>{{ s.exit_time_local.strftime('%Y-%m-%d %H:%M') if s.exit_time_local else '-' }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -607,7 +611,7 @@ HTML = """
             <div class="top">
                 <div>
                     <div class="symbol">{{ s.symbol }}</div>
-                    <div class="muted">{{ s.created_at.strftime('%Y-%m-%d %H:%M') if s.created_at else '-' }}</div>
+                    <div class="muted">{{ s.created_at_local.strftime('%Y-%m-%d %H:%M') if s.created_at_local else '-' }}</div>
                 </div>
                 <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
                     <span class="badge {% if s.side == 'LONG' %}badge-long{% else %}badge-short{% endif %}">{{ s.side }}</span>
@@ -644,7 +648,7 @@ HTML = """
                 <div><div class="k">1H %</div><div>{{ '%.2f'|format(s.change_1h) if s.change_1h is not none else '-' }}</div></div>
                 <div><div class="k">4H %</div><div>{{ '%.2f'|format(s.change_4h) if s.change_4h is not none else '-' }}</div></div>
                 <div><div class="k">RSI 4H</div><div>{{ '%.2f'|format(s.rsi_4h) if s.rsi_4h is not none else '-' }}</div></div>
-                <div><div class="k">Cooldown</div><div>{{ s.cooldown_until.strftime('%m-%d %H:%M') if s.cooldown_until else '-' }}</div></div>
+                <div><div class="k">Cooldown</div><div>{{ s.cooldown_until_local.strftime('%m-%d %H:%M') if s.cooldown_until_local else '-' }}</div></div>
             </div>
 
             <div style="margin-top:10px; font-size:12px;">
@@ -677,6 +681,22 @@ def parse_float(value):
         return float(value)
     except Exception:
         return None
+
+
+def to_istanbul_time(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(ISTANBUL_TZ)
+
+
+def localize_signal_times(signals):
+    for s in signals:
+        s.created_at_local = to_istanbul_time(s.created_at)
+        s.exit_time_local = to_istanbul_time(s.exit_time)
+        s.cooldown_until_local = to_istanbul_time(s.cooldown_until)
+    return signals
 
 
 def apply_filters(query):
@@ -728,6 +748,7 @@ def index():
         query, filters = apply_filters(query)
 
         signals = query.order_by(desc(Signal.id)).limit(300).all()
+        signals = localize_signal_times(signals)
 
         total = len(signals)
         open_count = len([s for s in signals if s.status == "OPEN"])
@@ -778,6 +799,7 @@ def export_csv():
         query, _ = apply_filters(query)
 
         rows = query.order_by(desc(Signal.id)).all()
+        rows = localize_signal_times(rows)
 
         si = StringIO()
         writer = csv.writer(si)
@@ -838,9 +860,9 @@ def export_csv():
                 s.change_4h,
                 s.entry_reason,
                 s.exit_reason,
-                s.cooldown_until.strftime('%Y-%m-%d %H:%M') if s.cooldown_until else "",
-                s.created_at.strftime('%Y-%m-%d %H:%M') if s.created_at else "",
-                s.exit_time.strftime('%Y-%m-%d %H:%M') if s.exit_time else "",
+                s.cooldown_until_local.strftime('%Y-%m-%d %H:%M') if s.cooldown_until_local else "",
+                s.created_at_local.strftime('%Y-%m-%d %H:%M') if s.created_at_local else "",
+                s.exit_time_local.strftime('%Y-%m-%d %H:%M') if s.exit_time_local else "",
             ])
 
         output = si.getvalue()
