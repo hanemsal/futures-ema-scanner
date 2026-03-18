@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 from sqlalchemy import desc
 
+from risk_engine import BinanceRiskEngine
 from storage import SessionLocal, Signal
 
 # =========================
@@ -144,7 +145,6 @@ def get_usdt_futures_symbols():
             if normalized in EXCLUDED_SYMBOLS:
                 continue
 
-            # leveraged / garip sembolleri ele
             if any(x in normalized for x in ["UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT"]):
                 continue
 
@@ -206,7 +206,6 @@ def build_timeframe_metrics(symbol: str):
         "is_new_coin": False,
     }
 
-    # 1M
     try:
         df_1M = fetch_ohlcv_df(symbol, "1M", 40)
         if len(df_1M) >= 20:
@@ -214,7 +213,6 @@ def build_timeframe_metrics(symbol: str):
     except Exception:
         pass
 
-    # 1W
     try:
         df_1W = fetch_ohlcv_df(symbol, "1w", 40)
         if len(df_1W) >= 20:
@@ -222,7 +220,6 @@ def build_timeframe_metrics(symbol: str):
     except Exception:
         pass
 
-    # 1D
     try:
         df_1D = fetch_ohlcv_df(symbol, "1d", 60)
         if len(df_1D) >= 20:
@@ -230,7 +227,6 @@ def build_timeframe_metrics(symbol: str):
     except Exception:
         pass
 
-    # 4H
     try:
         df_4h = fetch_ohlcv_df(symbol, "4h", 80)
         if len(df_4h) >= 20:
@@ -238,11 +234,9 @@ def build_timeframe_metrics(symbol: str):
     except Exception:
         pass
 
-    # NEW coin tespiti
     if metrics["rsi_monthly"] is None and metrics["rsi_weekly"] is None:
         metrics["is_new_coin"] = True
 
-    # 1H / 4H değişim
     try:
         df_1h = fetch_ohlcv_df(symbol, "1h", 10)
         if len(df_1h) >= 5:
@@ -265,11 +259,9 @@ def classify_signal_group(metrics: dict, quote_vol_24h: float) -> str:
     rsi_4h = metrics.get("rsi_4h")
     is_new = metrics.get("is_new_coin", False)
 
-    # NEW coin
     if is_new and quote_vol_24h >= MIN_NEW_QUOTEVOL24H:
         return "NEW"
 
-    # DIP coin
     if (
         quote_vol_24h >= MIN_DIP_QUOTEVOL24H
         and rsi_m is not None and rsi_m <= RSI_MONTH_MAX
@@ -360,6 +352,9 @@ def create_signal(
     quality: str,
     metrics: dict,
     entry_reason: str,
+    risk_level: str | None = None,
+    risk_score: float | None = None,
+    risk_reasons: str | None = None,
 ):
     cooldown_until = datetime.utcnow() + timedelta(minutes=SIGNAL_COOLDOWN_MINUTES)
 
@@ -387,6 +382,9 @@ def create_signal(
         cooldown_until=cooldown_until,
         created_at=datetime.utcnow(),
         exit_time=None,
+        risk_level=risk_level,
+        risk_score=risk_score,
+        risk_reasons=risk_reasons,
     )
     db.add(row)
     db.commit()
@@ -435,6 +433,7 @@ def send_entry_alert(row: Signal, vol_ratio: float):
         f"EMA: {row.ema_set}\n"
         f"VolRatio: {vol_ratio:.2f}\n"
         f"Score: {row.score} | Quality: {row.quality}\n"
+        f"Risk: {row.risk_level or '-'} ({row.risk_score if row.risk_score is not None else '-'})\n"
         f"Reason: {row.entry_reason}"
     )
     send_telegram_message(msg)
@@ -527,11 +526,26 @@ def should_exit_short(df: pd.DataFrame) -> bool:
 
 
 # =========================
+# RISK
+# =========================
+def build_risk_map_safe():
+    try:
+        risk_engine = BinanceRiskEngine()
+        risk_map = risk_engine.build_risk_map()
+        print(f"Risk map hazır: {len(risk_map)} sembol", flush=True)
+        return risk_map
+    except Exception as e:
+        print(f"Risk engine hatası: {e}", flush=True)
+        return {}
+
+
+# =========================
 # MAIN SCAN
 # =========================
 def scan_once():
     db = SessionLocal()
     try:
+        risk_map = build_risk_map_safe()
         symbols = get_usdt_futures_symbols()
         tickers = exchange.fetch_tickers()
 
@@ -542,10 +556,24 @@ def scan_once():
 
         for symbol in symbols:
             try:
+                normalized_symbol = normalize_symbol(symbol)
+                risk = risk_map.get(normalized_symbol)
+
+                if risk:
+                    print(
+                        f"[RISK] {normalized_symbol} | {risk.risk_level} | "
+                        f"score={risk.risk_score} | reasons={risk.reasons}",
+                        flush=True,
+                    )
+
+                # SADECE RESMI DELIST BLOCK
+                if risk and risk.spot_delist_flag:
+                    print(f"[SKIP DELIST] {normalized_symbol}", flush=True)
+                    continue
+
                 ticker = tickers.get(symbol) or {}
                 quote_vol_24h = get_quote_volume_24h(ticker)
 
-                # minimum alt eşik: new coin bile olsa 1M altı tarama
                 if quote_vol_24h < MIN_NEW_QUOTEVOL24H:
                     continue
 
@@ -570,12 +598,15 @@ def scan_once():
                 avg_qv_10 = calc_avg_quote_vol_last_10_closed(df)
                 vol_ratio = (cross_candle_vol / avg_qv_10) if avg_qv_10 > 0 else 0.0
 
-                # hard floor: çok zayıf hacimli hareketi alma
                 if vol_ratio < MIN_VOL_RATIO:
                     continue
 
                 score = get_signal_score(signal_group, vol_ratio, metrics)
                 quality = get_quality(score)
+
+                risk_level = risk.risk_level if risk else None
+                risk_score = float(risk.risk_score) if risk and risk.risk_score is not None else None
+                risk_reasons = " | ".join(risk.reasons) if risk and risk.reasons else None
 
                 # ================= OPEN TRADE MANAGEMENT =================
                 open_rows = (
@@ -611,8 +642,15 @@ def scan_once():
                                 quality=quality,
                                 metrics=metrics,
                                 entry_reason="ema8_cross_above_ema18",
+                                risk_level=risk_level,
+                                risk_score=risk_score,
+                                risk_reasons=risk_reasons,
                             )
-                            print(f"LONG CROSS: {symbol} | score={score} | group={signal_group} | vr={vol_ratio:.2f}", flush=True)
+                            print(
+                                f"LONG CROSS: {symbol} | score={score} | group={signal_group} | "
+                                f"vr={vol_ratio:.2f} | risk={risk_level}",
+                                flush=True,
+                            )
                             send_entry_alert(row, vol_ratio)
 
                         elif long_bounce_entry(df):
@@ -627,8 +665,15 @@ def scan_once():
                                 quality=quality,
                                 metrics=metrics,
                                 entry_reason="ema18_bounce_long",
+                                risk_level=risk_level,
+                                risk_score=risk_score,
+                                risk_reasons=risk_reasons,
                             )
-                            print(f"LONG BOUNCE: {symbol} | score={score} | group={signal_group} | vr={vol_ratio:.2f}", flush=True)
+                            print(
+                                f"LONG BOUNCE: {symbol} | score={score} | group={signal_group} | "
+                                f"vr={vol_ratio:.2f} | risk={risk_level}",
+                                flush=True,
+                            )
                             send_entry_alert(row, vol_ratio)
 
                 # ================= SHORT ENTRY =================
@@ -647,8 +692,15 @@ def scan_once():
                                 quality=quality,
                                 metrics=metrics,
                                 entry_reason="ema8_cross_below_ema18",
+                                risk_level=risk_level,
+                                risk_score=risk_score,
+                                risk_reasons=risk_reasons,
                             )
-                            print(f"SHORT CROSS: {symbol} | score={score} | group={signal_group} | vr={vol_ratio:.2f}", flush=True)
+                            print(
+                                f"SHORT CROSS: {symbol} | score={score} | group={signal_group} | "
+                                f"vr={vol_ratio:.2f} | risk={risk_level}",
+                                flush=True,
+                            )
                             send_entry_alert(row, vol_ratio)
 
                         elif short_bounce_entry(df):
@@ -663,8 +715,15 @@ def scan_once():
                                 quality=quality,
                                 metrics=metrics,
                                 entry_reason="ema18_bounce_short",
+                                risk_level=risk_level,
+                                risk_score=risk_score,
+                                risk_reasons=risk_reasons,
                             )
-                            print(f"SHORT BOUNCE: {symbol} | score={score} | group={signal_group} | vr={vol_ratio:.2f}", flush=True)
+                            print(
+                                f"SHORT BOUNCE: {symbol} | score={score} | group={signal_group} | "
+                                f"vr={vol_ratio:.2f} | risk={risk_level}",
+                                flush=True,
+                            )
                             send_entry_alert(row, vol_ratio)
 
                 time.sleep(0.03)
