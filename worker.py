@@ -61,6 +61,13 @@ exchange = ccxt.binance({
 
 
 # =========================
+# TIME
+# =========================
+def utc_now_naive() -> datetime:
+    return datetime.utcnow()
+
+
+# =========================
 # TELEGRAM
 # =========================
 def send_telegram_message(text: str):
@@ -81,12 +88,6 @@ def send_telegram_message(text: str):
 # HELPERS
 # =========================
 def normalize_symbol(symbol: str) -> str:
-    """
-    ccxt futures sembolü:
-      EWY/USDT:USDT -> EWYUSDT
-      BTC/USDT:USDT -> BTCUSDT
-      DOGE/USDT     -> DOGEUSDT
-    """
     s = symbol.upper().strip()
 
     if ":" in s:
@@ -375,7 +376,7 @@ def create_signal(
     risk_score: float | None = None,
     risk_reasons: str | None = None,
 ):
-    cooldown_until = datetime.utcnow() + timedelta(minutes=SIGNAL_COOLDOWN_MINUTES)
+    cooldown_until = utc_now_naive() + timedelta(minutes=SIGNAL_COOLDOWN_MINUTES)
 
     row = Signal(
         symbol=symbol,
@@ -399,7 +400,7 @@ def create_signal(
         entry_reason=entry_reason,
         exit_reason=None,
         cooldown_until=cooldown_until,
-        created_at=datetime.utcnow(),
+        created_at=utc_now_naive(),
         exit_time=None,
         risk_level=risk_level,
         risk_score=risk_score,
@@ -429,7 +430,7 @@ def close_trade(db, signal: Signal, exit_price: float, reason: str):
         pnl = ((signal.entry - exit_price) / signal.entry) * 100.0
 
     signal.exit = exit_price
-    signal.exit_time = datetime.utcnow()
+    signal.exit_time = utc_now_naive()
     signal.status = "CLOSED"
     signal.pnl = round(pnl, 2)
     signal.exit_reason = reason
@@ -617,7 +618,6 @@ def scan_once():
                         flush=True,
                     )
 
-                # SADECE RESMI DELIST BLOK
                 if risk and risk.spot_delist_flag:
                     print(f"[SKIP DELIST] {normalized_symbol}", flush=True)
                     continue
@@ -655,7 +655,6 @@ def scan_once():
                 score = get_signal_score(signal_group, vol_ratio, metrics)
                 quality = get_quality(score)
 
-                # Risk fields: eşleşme yoksa default SAFE yaz
                 if risk:
                     risk_level = risk.risk_level
                     risk_score = float(risk.risk_score) if risk.risk_score is not None else 0.0
@@ -665,7 +664,6 @@ def scan_once():
                     risk_score = 0.0
                     risk_reasons = "No risk map match; default SAFE"
 
-                # ================= OPEN TRADE MANAGEMENT =================
                 open_rows = (
                     db.query(Signal)
                     .filter(Signal.symbol == symbol, Signal.status == "OPEN")
@@ -683,7 +681,6 @@ def scan_once():
                         close_trade(db, row, current_price, "Price closed above EMA18")
                         send_exit_alert(row)
 
-                # ================= LONG ENTRY =================
                 if ENABLE_PUMP_LONG and vol_ratio >= PUMP_MIN_VOL_RATIO:
                     last_long = get_last_signal(db, symbol, "LONG")
                     if (not in_cooldown(last_long)) and (not has_open_signal(db, symbol, "LONG")):
@@ -733,7 +730,6 @@ def scan_once():
                             )
                             send_entry_alert(row, vol_ratio)
 
-                # ================= SHORT ENTRY =================
                 if ENABLE_PUMP_SHORT and vol_ratio >= PUMP_MIN_VOL_RATIO:
                     last_short = get_last_signal(db, symbol, "SHORT")
                     if (not in_cooldown(last_short)) and (not has_open_signal(db, symbol, "SHORT")):
