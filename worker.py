@@ -26,8 +26,11 @@ EMA_FAST = int(os.getenv("PUMP_EMA_FAST", "8"))
 EMA_MID = int(os.getenv("PUMP_EMA_MID", "18"))
 EMA_TREND = int(os.getenv("PUMP_EMA_TREND", "34"))
 
-ENABLE_LONG = os.getenv("ENABLE_PUMP_LONG", "true").strip().lower() == "true"
-ENABLE_SHORT = os.getenv("ENABLE_PUMP_SHORT", "true").strip().lower() == "true"
+# FINAL:
+# Artık entry enable kontrolü pump env'lerinden bağımsız.
+# Bu env'ler yoksa default true çalışır.
+ENABLE_LONG = os.getenv("ENABLE_LONG", "true").strip().lower() == "true"
+ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").strip().lower() == "true"
 
 # Universe thresholds
 MIN_DIP_QUOTEVOL24H = float(os.getenv("MIN_QUOTE_VOLUME_24H", "10000000"))
@@ -41,9 +44,9 @@ RSI_4H_MAX = float(os.getenv("RSI_4H_MAX", "50"))
 
 # Entry / exit thresholds
 CROSS_MIN_VOL_RATIO = float(os.getenv("CROSS_MIN_VOL_RATIO", "1.3"))
-STRONG_VOL_RATIO = float(os.getenv("STRONG_VOL_RATIO", "1.5"))
+STRONG_VOL_RATIO = float(os.getenv("STRONG_VOL_RATIO", "3.0"))
 MIN_BODY_RATIO = float(os.getenv("MIN_BODY_RATIO", "0.6"))
-SIGNAL_COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "30"))
+SIGNAL_COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "45"))
 
 ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 
@@ -668,8 +671,9 @@ def scan_once():
                     continue
 
                 current_price = float(last_closed["close"])
-                vol_ratio = 0.0
+
                 avg_qv_10 = calc_avg_quote_vol_last_10_closed(df)
+                vol_ratio = 0.0
                 if avg_qv_10 > 0:
                     vol_ratio = calc_quote_candle_vol(last_closed) / avg_qv_10
 
@@ -714,7 +718,6 @@ def scan_once():
                         )
                         send_exit_alert(row, vol_ratio, body_ratio)
 
-                # LONG
                 last_long = get_last_signal(db, symbol, "LONG")
                 can_open_long = (not in_cooldown(last_long)) and (not has_open_signal(db, symbol, "LONG"))
 
@@ -745,7 +748,6 @@ def scan_once():
                     )
                     send_entry_alert(row, vol_ratio, body_ratio, candle_type)
 
-                # SHORT
                 last_short = get_last_signal(db, symbol, "SHORT")
                 can_open_short = (not in_cooldown(last_short)) and (not has_open_signal(db, symbol, "SHORT"))
 
@@ -787,6 +789,12 @@ def scan_once():
 
 if __name__ == "__main__":
     print("worker final başladı...", flush=True)
+    print(
+        f"ENABLE_LONG={ENABLE_LONG} | ENABLE_SHORT={ENABLE_SHORT} | "
+        f"TIMEFRAME={TIMEFRAME} | CROSS_MIN_VOL_RATIO={CROSS_MIN_VOL_RATIO} | "
+        f"STRONG_VOL_RATIO={STRONG_VOL_RATIO}",
+        flush=True,
+    )
     send_telegram_message("🚀 worker final started")
 
     while True:
