@@ -8,3 +8,4 @@ sqlalchemy
 requests
 fastapi
 uvicorn
+beautifulsoup4
