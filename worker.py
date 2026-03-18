@@ -29,7 +29,7 @@ ENABLE_PUMP_LONG = os.getenv("ENABLE_PUMP_LONG", "true").strip().lower() == "tru
 ENABLE_PUMP_SHORT = os.getenv("ENABLE_PUMP_SHORT", "true").strip().lower() == "true"
 
 # Universe thresholds
-MIN_DIP_QUOTEVOL24H = float(os.getenv("MIN_QUOTE_VOLUME_24H", "10000000"))   # 10M
+MIN_DIP_QUOTEVOL24H = float(os.getenv("MIN_QUOTE_VOLUME_24H", "10000000"))     # 10M
 MIN_NEW_QUOTEVOL24H = float(os.getenv("MIN_NEW_QUOTE_VOLUME_24H", "1000000"))  # 1M
 
 # RSI thresholds
@@ -81,7 +81,19 @@ def send_telegram_message(text: str):
 # HELPERS
 # =========================
 def normalize_symbol(symbol: str) -> str:
-    return symbol.replace("/", "").replace(":", "").upper()
+    """
+    ccxt futures sembolü:
+      EWY/USDT:USDT -> EWYUSDT
+      BTC/USDT:USDT -> BTCUSDT
+      DOGE/USDT     -> DOGEUSDT
+    """
+    s = symbol.upper().strip()
+
+    if ":" in s:
+        s = s.split(":")[0]
+
+    s = s.replace("/", "")
+    return s
 
 
 def calculate_ema(df: pd.DataFrame, period: int) -> pd.Series:
@@ -566,7 +578,7 @@ def scan_once():
                         flush=True,
                     )
 
-                # SADECE RESMI DELIST BLOCK
+                # SADECE RESMI DELIST BLOK
                 if risk and risk.spot_delist_flag:
                     print(f"[SKIP DELIST] {normalized_symbol}", flush=True)
                     continue
