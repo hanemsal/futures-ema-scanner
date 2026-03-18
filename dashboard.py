@@ -1,5 +1,6 @@
 from flask import Flask, render_template_string, request
 from sqlalchemy import desc
+
 from storage import SessionLocal, Signal
 
 app = Flask(__name__)
@@ -38,7 +39,7 @@ HTML = """
         }
 
         .container {
-            max-width: 1600px;
+            max-width: 1700px;
             margin: 0 auto;
             padding: 16px;
         }
@@ -73,7 +74,7 @@ HTML = """
 
         .filters {
             display: grid;
-            grid-template-columns: repeat(8, minmax(120px, 1fr));
+            grid-template-columns: repeat(9, minmax(120px, 1fr));
             gap: 10px;
         }
 
@@ -169,7 +170,7 @@ HTML = """
 
         table {
             width: 100%;
-            min-width: 1500px;
+            min-width: 1800px;
             border-collapse: collapse;
             font-size: 13px;
         }
@@ -266,6 +267,24 @@ HTML = """
             border-color: rgba(239,68,68,0.35);
         }
 
+        .badge-risk-safe {
+            background: rgba(34,197,94,0.12);
+            color: var(--green);
+            border-color: rgba(34,197,94,0.35);
+        }
+
+        .badge-risk-risk {
+            background: rgba(234,179,8,0.12);
+            color: var(--yellow);
+            border-color: rgba(234,179,8,0.35);
+        }
+
+        .badge-risk-delist {
+            background: rgba(239,68,68,0.12);
+            color: var(--red);
+            border-color: rgba(239,68,68,0.35);
+        }
+
         .mobile-cards {
             display: none;
             gap: 12px;
@@ -343,13 +362,14 @@ HTML = """
     <div class="header">
         <div>
             <div class="title">🚀 Pump Hunter Dashboard</div>
-            <div class="subtitle">EMA 8 / 18 / 34 • LONG / SHORT • Cross / Bounce • Mobil uyumlu analiz ekranı</div>
+            <div class="subtitle">EMA 8 / 18 / 34 • LONG / SHORT • Cross / Bounce • Risk gözlem kolonları dahil</div>
         </div>
     </div>
 
     <form method="get" class="toolbar">
         <div class="filters">
             <input type="text" name="symbol" placeholder="Coin ara" value="{{ filters.symbol }}">
+
             <select name="side">
                 <option value="">Side</option>
                 <option value="LONG" {% if filters.side == 'LONG' %}selected{% endif %}>LONG</option>
@@ -380,6 +400,13 @@ HTML = """
                 <option value="A" {% if filters.quality == 'A' %}selected{% endif %}>A</option>
                 <option value="B" {% if filters.quality == 'B' %}selected{% endif %}>B</option>
                 <option value="C" {% if filters.quality == 'C' %}selected{% endif %}>C</option>
+            </select>
+
+            <select name="risk_level">
+                <option value="">Risk</option>
+                <option value="SAFE" {% if filters.risk_level == 'SAFE' %}selected{% endif %}>SAFE</option>
+                <option value="RISK" {% if filters.risk_level == 'RISK' %}selected{% endif %}>RISK</option>
+                <option value="DELIST" {% if filters.risk_level == 'DELIST' %}selected{% endif %}>DELIST</option>
             </select>
 
             <input type="number" step="0.01" name="min_score" placeholder="Min score" value="{{ filters.min_score }}">
@@ -460,6 +487,9 @@ HTML = """
                         <th>Entry Type</th>
                         <th>Quality</th>
                         <th>Score</th>
+                        <th>Risk</th>
+                        <th>Risk Score</th>
+                        <th>Risk Notes</th>
                         <th>EMA</th>
                         <th>Entry</th>
                         <th>Exit</th>
@@ -513,6 +543,21 @@ HTML = """
                         <td class="{% if s.score and s.score >= 85 %}green{% elif s.score and s.score >= 70 %}yellow{% else %}red{% endif %}">
                             {{ s.score if s.score is not none else '-' }}
                         </td>
+
+                        <td>
+                            {% if s.risk_level == 'DELIST' %}
+                                <span class="badge badge-risk-delist">🔴 DELIST</span>
+                            {% elif s.risk_level == 'RISK' %}
+                                <span class="badge badge-risk-risk">🟡 RISK</span>
+                            {% elif s.risk_level == 'SAFE' %}
+                                <span class="badge badge-risk-safe">🟢 SAFE</span>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{{ s.risk_score if s.risk_score is not none else '-' }}</td>
+                        <td class="left">{{ s.risk_reasons or '-' }}</td>
+
                         <td>{{ s.ema_set or '-' }}</td>
                         <td>{{ '%.6f'|format(s.entry) if s.entry is not none else '-' }}</td>
                         <td>{{ '%.6f'|format(s.exit) if s.exit is not none else '-' }}</td>
@@ -564,10 +609,19 @@ HTML = """
                     {{ s.quality or '-' }}
                 </span>
                 <span class="badge badge-closed">{{ s.entry_type or '-' }}</span>
+
+                {% if s.risk_level == 'DELIST' %}
+                    <span class="badge badge-risk-delist">🔴 DELIST</span>
+                {% elif s.risk_level == 'RISK' %}
+                    <span class="badge badge-risk-risk">🟡 RISK</span>
+                {% elif s.risk_level == 'SAFE' %}
+                    <span class="badge badge-risk-safe">🟢 SAFE</span>
+                {% endif %}
             </div>
 
             <div class="signal-grid">
                 <div><div class="k">Score</div><div>{{ s.score if s.score is not none else '-' }}</div></div>
+                <div><div class="k">Risk Score</div><div>{{ s.risk_score if s.risk_score is not none else '-' }}</div></div>
                 <div><div class="k">EMA</div><div>{{ s.ema_set or '-' }}</div></div>
                 <div><div class="k">Entry</div><div>{{ '%.6f'|format(s.entry) if s.entry is not none else '-' }}</div></div>
                 <div><div class="k">Exit</div><div>{{ '%.6f'|format(s.exit) if s.exit is not none else '-' }}</div></div>
@@ -580,6 +634,7 @@ HTML = """
             </div>
 
             <div style="margin-top:10px; font-size:12px;">
+                <div><span class="muted">Risk Notes:</span> {{ s.risk_reasons or '-' }}</div>
                 <div><span class="muted">Entry Reason:</span> {{ s.entry_reason or '-' }}</div>
                 <div><span class="muted">Exit Reason:</span> {{ s.exit_reason or '-' }}</div>
             </div>
@@ -600,6 +655,7 @@ def parse_float(value):
     except Exception:
         return None
 
+
 @app.route("/")
 def index():
     db = SessionLocal()
@@ -612,6 +668,7 @@ def index():
         signal_group = request.args.get("signal_group", "").strip()
         entry_type = request.args.get("entry_type", "").strip()
         quality = request.args.get("quality", "").strip()
+        risk_level = request.args.get("risk_level", "").strip()
         min_score = parse_float(request.args.get("min_score", "").strip())
 
         if symbol:
@@ -626,6 +683,8 @@ def index():
             query = query.filter(Signal.entry_type == entry_type)
         if quality:
             query = query.filter(Signal.quality == quality)
+        if risk_level:
+            query = query.filter(Signal.risk_level == risk_level)
         if min_score is not None:
             query = query.filter(Signal.score >= min_score)
 
@@ -669,6 +728,7 @@ def index():
             "signal_group": signal_group,
             "entry_type": entry_type,
             "quality": quality,
+            "risk_level": risk_level,
             "min_score": request.args.get("min_score", "").strip(),
         }
 
@@ -680,6 +740,7 @@ def index():
         )
     finally:
         db.close()
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
