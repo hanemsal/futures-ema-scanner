@@ -1,9 +1,9 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+import os
 from datetime import datetime
 
-import os
+from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine, inspect, text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///signals.db")
 
@@ -52,4 +52,34 @@ class Signal(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     exit_time = Column(DateTime)
 
+    # Risk fields
+    risk_level = Column(String)
+    risk_score = Column(Float)
+    risk_reasons = Column(String)
+
+
+def ensure_signal_columns():
+    inspector = inspect(engine)
+    if "signals" not in inspector.get_table_names():
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("signals")}
+
+    missing_columns = []
+    if "risk_level" not in existing_columns:
+        missing_columns.append(("risk_level", "VARCHAR"))
+    if "risk_score" not in existing_columns:
+        missing_columns.append(("risk_score", "FLOAT"))
+    if "risk_reasons" not in existing_columns:
+        missing_columns.append(("risk_reasons", "VARCHAR"))
+
+    if not missing_columns:
+        return
+
+    with engine.begin() as conn:
+        for col_name, col_type in missing_columns:
+            conn.execute(text(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}"))
+
+
 Base.metadata.create_all(bind=engine)
+ensure_signal_columns()
