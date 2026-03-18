@@ -28,7 +28,7 @@ EMA_TREND = int(os.getenv("PUMP_EMA_TREND", "34"))
 ENABLE_PUMP_LONG = os.getenv("ENABLE_PUMP_LONG", "true").strip().lower() == "true"
 ENABLE_PUMP_SHORT = os.getenv("ENABLE_PUMP_SHORT", "true").strip().lower() == "true"
 
-# Yeni: cross ve bounce ayrı kontrol
+# Ayrı aç/kapat
 ENABLE_CROSS_LONG = os.getenv("ENABLE_CROSS_LONG", "true").strip().lower() == "true"
 ENABLE_CROSS_SHORT = os.getenv("ENABLE_CROSS_SHORT", "true").strip().lower() == "true"
 ENABLE_BOUNCE_LONG = os.getenv("ENABLE_BOUNCE_LONG", "true").strip().lower() == "true"
@@ -44,10 +44,10 @@ RSI_WEEK_MAX = float(os.getenv("RSI_WEEK_MAX", "20"))
 RSI_DAY_MAX = float(os.getenv("RSI_DAY_MAX", "50"))
 RSI_4H_MAX = float(os.getenv("RSI_4H_MAX", "50"))
 
-# Volume signal thresholds
+# Volume thresholds
 MIN_VOL_RATIO = float(os.getenv("MIN_VOL_RATIO", "1.3"))
-CROSS_MIN_VOL_RATIO = float(os.getenv("CROSS_MIN_VOL_RATIO", str(MIN_VOL_RATIO)))   # cross daha erken
-PUMP_MIN_VOL_RATIO = float(os.getenv("PUMP_MIN_VOL_RATIO", "1.5"))                  # bounce daha sıkı
+CROSS_MIN_VOL_RATIO = float(os.getenv("CROSS_MIN_VOL_RATIO", str(MIN_VOL_RATIO)))
+PUMP_MIN_VOL_RATIO = float(os.getenv("PUMP_MIN_VOL_RATIO", "1.5"))
 STRONG_VOL_RATIO = float(os.getenv("STRONG_VOL_RATIO", "3.0"))
 
 SIGNAL_COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "30"))
@@ -96,12 +96,9 @@ def send_telegram_message(text: str):
 # =========================
 def normalize_symbol(symbol: str) -> str:
     s = symbol.upper().strip()
-
     if ":" in s:
         s = s.split(":")[0]
-
-    s = s.replace("/", "")
-    return s
+    return s.replace("/", "")
 
 
 def extract_base_asset_from_symbol(symbol: str) -> str:
@@ -698,7 +695,7 @@ def scan_once():
                         close_trade(db, row, current_price, "Price closed above EMA18")
                         send_exit_alert(row)
 
-                # ================= LONG ENTRY =================
+                # LONG
                 last_long = get_last_signal(db, symbol, "LONG")
                 can_open_long = (not in_cooldown(last_long)) and (not has_open_signal(db, symbol, "LONG"))
 
@@ -749,7 +746,7 @@ def scan_once():
                         )
                         send_entry_alert(row, vol_ratio)
 
-                # ================= SHORT ENTRY =================
+                # SHORT
                 last_short = get_last_signal(db, symbol, "SHORT")
                 can_open_short = (not in_cooldown(last_short)) and (not has_open_signal(db, symbol, "SHORT"))
 
