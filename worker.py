@@ -96,6 +96,13 @@ def normalize_symbol(symbol: str) -> str:
     return s
 
 
+def extract_base_asset_from_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+    if normalized.endswith("USDT"):
+        return normalized[:-4]
+    return normalized
+
+
 def calculate_ema(df: pd.DataFrame, period: int) -> pd.Series:
     return df["close"].ewm(span=period, adjust=False).mean()
 
@@ -500,7 +507,7 @@ def short_cross_entry(df: pd.DataFrame) -> bool:
         return False
 
     return (
-        crosses_below(prev_row["ema_fast"], prev_row["ema_mid"], last_row["ema_fast"], last_row["ema_mid"])
+        crosses_below(prev_fast=prev_row["ema_fast"], prev_mid=prev_row["ema_mid"], curr_fast=last_row["ema_fast"], curr_mid=last_row["ema_mid"])
         and last_row["ema_mid"] < last_row["ema_trend"]
         and last_row["close"] < last_row["ema_mid"]
     )
@@ -540,15 +547,41 @@ def should_exit_short(df: pd.DataFrame) -> bool:
 # =========================
 # RISK
 # =========================
-def build_risk_map_safe():
+def build_risk_maps_safe():
     try:
         risk_engine = BinanceRiskEngine()
-        risk_map = risk_engine.build_risk_map()
-        print(f"Risk map hazır: {len(risk_map)} sembol", flush=True)
-        return risk_map
+        symbol_risk_map = risk_engine.build_risk_map()
+
+        base_asset_risk_map = {}
+        for sym, risk in symbol_risk_map.items():
+            base_asset = getattr(risk, "base_asset", None)
+            if base_asset:
+                base_asset_risk_map[base_asset.upper()] = risk
+
+        print(
+            f"Risk map hazır: symbol={len(symbol_risk_map)} | base_asset={len(base_asset_risk_map)}",
+            flush=True,
+        )
+        return symbol_risk_map, base_asset_risk_map
+
     except Exception as e:
         print(f"Risk engine hatası: {e}", flush=True)
-        return {}
+        return {}, {}
+
+
+def resolve_risk(symbol: str, symbol_risk_map: dict, base_asset_risk_map: dict):
+    normalized_symbol = normalize_symbol(symbol)
+    base_asset = extract_base_asset_from_symbol(symbol)
+
+    risk = symbol_risk_map.get(normalized_symbol)
+    if risk:
+        return risk
+
+    risk = base_asset_risk_map.get(base_asset)
+    if risk:
+        return risk
+
+    return None
 
 
 # =========================
@@ -557,7 +590,7 @@ def build_risk_map_safe():
 def scan_once():
     db = SessionLocal()
     try:
-        risk_map = build_risk_map_safe()
+        symbol_risk_map, base_asset_risk_map = build_risk_maps_safe()
         symbols = get_usdt_futures_symbols()
         tickers = exchange.fetch_tickers()
 
@@ -569,12 +602,18 @@ def scan_once():
         for symbol in symbols:
             try:
                 normalized_symbol = normalize_symbol(symbol)
-                risk = risk_map.get(normalized_symbol)
+                base_asset = extract_base_asset_from_symbol(symbol)
+                risk = resolve_risk(symbol, symbol_risk_map, base_asset_risk_map)
 
                 if risk:
                     print(
-                        f"[RISK] {normalized_symbol} | {risk.risk_level} | "
-                        f"score={risk.risk_score} | reasons={risk.reasons}",
+                        f"[RISK MATCH] {symbol} -> {normalized_symbol} | base={base_asset} | "
+                        f"{risk.risk_level} | score={risk.risk_score} | reasons={risk.reasons}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[RISK DEFAULT] {symbol} -> {normalized_symbol} | base={base_asset} | no risk match",
                         flush=True,
                     )
 
@@ -616,9 +655,15 @@ def scan_once():
                 score = get_signal_score(signal_group, vol_ratio, metrics)
                 quality = get_quality(score)
 
-                risk_level = risk.risk_level if risk else None
-                risk_score = float(risk.risk_score) if risk and risk.risk_score is not None else None
-                risk_reasons = " | ".join(risk.reasons) if risk and risk.reasons else None
+                # Risk fields: eşleşme yoksa default SAFE yaz
+                if risk:
+                    risk_level = risk.risk_level
+                    risk_score = float(risk.risk_score) if risk.risk_score is not None else 0.0
+                    risk_reasons = " | ".join(risk.reasons) if risk.reasons else "Matched risk map"
+                else:
+                    risk_level = "SAFE"
+                    risk_score = 0.0
+                    risk_reasons = "No risk map match; default SAFE"
 
                 # ================= OPEN TRADE MANAGEMENT =================
                 open_rows = (
