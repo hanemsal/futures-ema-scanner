@@ -28,6 +28,12 @@ EMA_TREND = int(os.getenv("PUMP_EMA_TREND", "34"))
 ENABLE_PUMP_LONG = os.getenv("ENABLE_PUMP_LONG", "true").strip().lower() == "true"
 ENABLE_PUMP_SHORT = os.getenv("ENABLE_PUMP_SHORT", "true").strip().lower() == "true"
 
+# Yeni: cross ve bounce ayrı kontrol
+ENABLE_CROSS_LONG = os.getenv("ENABLE_CROSS_LONG", "true").strip().lower() == "true"
+ENABLE_CROSS_SHORT = os.getenv("ENABLE_CROSS_SHORT", "true").strip().lower() == "true"
+ENABLE_BOUNCE_LONG = os.getenv("ENABLE_BOUNCE_LONG", "true").strip().lower() == "true"
+ENABLE_BOUNCE_SHORT = os.getenv("ENABLE_BOUNCE_SHORT", "true").strip().lower() == "true"
+
 # Universe thresholds
 MIN_DIP_QUOTEVOL24H = float(os.getenv("MIN_QUOTE_VOLUME_24H", "10000000"))     # 10M
 MIN_NEW_QUOTEVOL24H = float(os.getenv("MIN_NEW_QUOTE_VOLUME_24H", "1000000"))  # 1M
@@ -40,7 +46,8 @@ RSI_4H_MAX = float(os.getenv("RSI_4H_MAX", "50"))
 
 # Volume signal thresholds
 MIN_VOL_RATIO = float(os.getenv("MIN_VOL_RATIO", "1.3"))
-PUMP_MIN_VOL_RATIO = float(os.getenv("PUMP_MIN_VOL_RATIO", "1.5"))
+CROSS_MIN_VOL_RATIO = float(os.getenv("CROSS_MIN_VOL_RATIO", str(MIN_VOL_RATIO)))   # cross daha erken
+PUMP_MIN_VOL_RATIO = float(os.getenv("PUMP_MIN_VOL_RATIO", "1.5"))                  # bounce daha sıkı
 STRONG_VOL_RATIO = float(os.getenv("STRONG_VOL_RATIO", "3.0"))
 
 SIGNAL_COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "30"))
@@ -479,7 +486,12 @@ def long_cross_entry(df: pd.DataFrame) -> bool:
         return False
 
     return (
-        crosses_above(prev_row["ema_fast"], prev_row["ema_mid"], last_row["ema_fast"], last_row["ema_mid"])
+        crosses_above(
+            prev_row["ema_fast"],
+            prev_row["ema_mid"],
+            last_row["ema_fast"],
+            last_row["ema_mid"],
+        )
         and last_row["ema_mid"] > last_row["ema_trend"]
         and last_row["close"] > last_row["ema_mid"]
     )
@@ -508,7 +520,12 @@ def short_cross_entry(df: pd.DataFrame) -> bool:
         return False
 
     return (
-        crosses_below(prev_fast=prev_row["ema_fast"], prev_mid=prev_row["ema_mid"], curr_fast=last_row["ema_fast"], curr_mid=last_row["ema_mid"])
+        crosses_below(
+            prev_row["ema_fast"],
+            prev_row["ema_mid"],
+            last_row["ema_fast"],
+            last_row["ema_mid"],
+        )
         and last_row["ema_mid"] < last_row["ema_trend"]
         and last_row["close"] < last_row["ema_mid"]
     )
@@ -681,103 +698,107 @@ def scan_once():
                         close_trade(db, row, current_price, "Price closed above EMA18")
                         send_exit_alert(row)
 
-                if ENABLE_PUMP_LONG and vol_ratio >= PUMP_MIN_VOL_RATIO:
-                    last_long = get_last_signal(db, symbol, "LONG")
-                    if (not in_cooldown(last_long)) and (not has_open_signal(db, symbol, "LONG")):
-                        if long_cross_entry(df):
-                            row = create_signal(
-                                db=db,
-                                symbol=symbol,
-                                side="LONG",
-                                signal_group=signal_group,
-                                entry_type="cross",
-                                entry_price=current_price,
-                                score=score,
-                                quality=quality,
-                                metrics=metrics,
-                                entry_reason="ema8_cross_above_ema18",
-                                risk_level=risk_level,
-                                risk_score=risk_score,
-                                risk_reasons=risk_reasons,
-                            )
-                            print(
-                                f"LONG CROSS: {symbol} | score={score} | group={signal_group} | "
-                                f"vr={vol_ratio:.2f} | risk={risk_level}",
-                                flush=True,
-                            )
-                            send_entry_alert(row, vol_ratio)
+                # ================= LONG ENTRY =================
+                last_long = get_last_signal(db, symbol, "LONG")
+                can_open_long = (not in_cooldown(last_long)) and (not has_open_signal(db, symbol, "LONG"))
 
-                        elif long_bounce_entry(df):
-                            row = create_signal(
-                                db=db,
-                                symbol=symbol,
-                                side="LONG",
-                                signal_group=signal_group,
-                                entry_type="bounce",
-                                entry_price=current_price,
-                                score=score,
-                                quality=quality,
-                                metrics=metrics,
-                                entry_reason="ema18_bounce_long",
-                                risk_level=risk_level,
-                                risk_score=risk_score,
-                                risk_reasons=risk_reasons,
-                            )
-                            print(
-                                f"LONG BOUNCE: {symbol} | score={score} | group={signal_group} | "
-                                f"vr={vol_ratio:.2f} | risk={risk_level}",
-                                flush=True,
-                            )
-                            send_entry_alert(row, vol_ratio)
+                if ENABLE_PUMP_LONG and can_open_long:
+                    if ENABLE_CROSS_LONG and vol_ratio >= CROSS_MIN_VOL_RATIO and long_cross_entry(df):
+                        row = create_signal(
+                            db=db,
+                            symbol=symbol,
+                            side="LONG",
+                            signal_group=signal_group,
+                            entry_type="cross",
+                            entry_price=current_price,
+                            score=score,
+                            quality=quality,
+                            metrics=metrics,
+                            entry_reason="ema8_cross_above_ema18",
+                            risk_level=risk_level,
+                            risk_score=risk_score,
+                            risk_reasons=risk_reasons,
+                        )
+                        print(
+                            f"LONG CROSS: {symbol} | score={score} | group={signal_group} | "
+                            f"vr={vol_ratio:.2f} | risk={risk_level}",
+                            flush=True,
+                        )
+                        send_entry_alert(row, vol_ratio)
 
-                if ENABLE_PUMP_SHORT and vol_ratio >= PUMP_MIN_VOL_RATIO:
-                    last_short = get_last_signal(db, symbol, "SHORT")
-                    if (not in_cooldown(last_short)) and (not has_open_signal(db, symbol, "SHORT")):
-                        if short_cross_entry(df):
-                            row = create_signal(
-                                db=db,
-                                symbol=symbol,
-                                side="SHORT",
-                                signal_group=signal_group,
-                                entry_type="cross",
-                                entry_price=current_price,
-                                score=score,
-                                quality=quality,
-                                metrics=metrics,
-                                entry_reason="ema8_cross_below_ema18",
-                                risk_level=risk_level,
-                                risk_score=risk_score,
-                                risk_reasons=risk_reasons,
-                            )
-                            print(
-                                f"SHORT CROSS: {symbol} | score={score} | group={signal_group} | "
-                                f"vr={vol_ratio:.2f} | risk={risk_level}",
-                                flush=True,
-                            )
-                            send_entry_alert(row, vol_ratio)
+                    elif ENABLE_BOUNCE_LONG and vol_ratio >= PUMP_MIN_VOL_RATIO and long_bounce_entry(df):
+                        row = create_signal(
+                            db=db,
+                            symbol=symbol,
+                            side="LONG",
+                            signal_group=signal_group,
+                            entry_type="bounce",
+                            entry_price=current_price,
+                            score=score,
+                            quality=quality,
+                            metrics=metrics,
+                            entry_reason="ema18_bounce_long",
+                            risk_level=risk_level,
+                            risk_score=risk_score,
+                            risk_reasons=risk_reasons,
+                        )
+                        print(
+                            f"LONG BOUNCE: {symbol} | score={score} | group={signal_group} | "
+                            f"vr={vol_ratio:.2f} | risk={risk_level}",
+                            flush=True,
+                        )
+                        send_entry_alert(row, vol_ratio)
 
-                        elif short_bounce_entry(df):
-                            row = create_signal(
-                                db=db,
-                                symbol=symbol,
-                                side="SHORT",
-                                signal_group=signal_group,
-                                entry_type="bounce",
-                                entry_price=current_price,
-                                score=score,
-                                quality=quality,
-                                metrics=metrics,
-                                entry_reason="ema18_bounce_short",
-                                risk_level=risk_level,
-                                risk_score=risk_score,
-                                risk_reasons=risk_reasons,
-                            )
-                            print(
-                                f"SHORT BOUNCE: {symbol} | score={score} | group={signal_group} | "
-                                f"vr={vol_ratio:.2f} | risk={risk_level}",
-                                flush=True,
-                            )
-                            send_entry_alert(row, vol_ratio)
+                # ================= SHORT ENTRY =================
+                last_short = get_last_signal(db, symbol, "SHORT")
+                can_open_short = (not in_cooldown(last_short)) and (not has_open_signal(db, symbol, "SHORT"))
+
+                if ENABLE_PUMP_SHORT and can_open_short:
+                    if ENABLE_CROSS_SHORT and vol_ratio >= CROSS_MIN_VOL_RATIO and short_cross_entry(df):
+                        row = create_signal(
+                            db=db,
+                            symbol=symbol,
+                            side="SHORT",
+                            signal_group=signal_group,
+                            entry_type="cross",
+                            entry_price=current_price,
+                            score=score,
+                            quality=quality,
+                            metrics=metrics,
+                            entry_reason="ema8_cross_below_ema18",
+                            risk_level=risk_level,
+                            risk_score=risk_score,
+                            risk_reasons=risk_reasons,
+                        )
+                        print(
+                            f"SHORT CROSS: {symbol} | score={score} | group={signal_group} | "
+                            f"vr={vol_ratio:.2f} | risk={risk_level}",
+                            flush=True,
+                        )
+                        send_entry_alert(row, vol_ratio)
+
+                    elif ENABLE_BOUNCE_SHORT and vol_ratio >= PUMP_MIN_VOL_RATIO and short_bounce_entry(df):
+                        row = create_signal(
+                            db=db,
+                            symbol=symbol,
+                            side="SHORT",
+                            signal_group=signal_group,
+                            entry_type="bounce",
+                            entry_price=current_price,
+                            score=score,
+                            quality=quality,
+                            metrics=metrics,
+                            entry_reason="ema18_bounce_short",
+                            risk_level=risk_level,
+                            risk_score=risk_score,
+                            risk_reasons=risk_reasons,
+                        )
+                        print(
+                            f"SHORT BOUNCE: {symbol} | score={score} | group={signal_group} | "
+                            f"vr={vol_ratio:.2f} | risk={risk_level}",
+                            flush=True,
+                        )
+                        send_entry_alert(row, vol_ratio)
 
                 time.sleep(0.03)
 
