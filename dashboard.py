@@ -698,7 +698,7 @@ def parse_float(value):
         return None
 
 
-def to_istanbul_time(dt):
+def to_istanbul_from_utc(dt):
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -706,11 +706,22 @@ def to_istanbul_time(dt):
     return dt.astimezone(ISTANBUL_TZ)
 
 
+def to_istanbul_passthrough(dt):
+    if dt is None:
+        return None
+    # worker created_at ve exit_time alanlarını Istanbul saatinde naive yazıyor.
+    # Bu yüzden bu alanlara tekrar UTC -> Istanbul dönüşümü uygularsak +3 saat kayar.
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=ISTANBUL_TZ)
+    return dt.astimezone(ISTANBUL_TZ)
+
+
 def localize_signal_times(signals):
     for s in signals:
-        s.created_at_local = to_istanbul_time(s.created_at)
-        s.exit_time_local = to_istanbul_time(s.exit_time)
-        s.cooldown_until_local = to_istanbul_time(s.cooldown_until)
+        s.created_at_local = to_istanbul_passthrough(s.created_at)
+        s.exit_time_local = to_istanbul_passthrough(s.exit_time)
+        # cooldown_until UTC naive olarak hesaplanıyor; bunu UTC -> Istanbul çeviriyoruz.
+        s.cooldown_until_local = to_istanbul_from_utc(s.cooldown_until)
     return signals
 
 
