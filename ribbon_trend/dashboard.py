@@ -158,7 +158,7 @@ def ribbon():
     <html>
     <head>
         <title>{RIBBON_DASHBOARD_TITLE}</title>
-        <meta http-equiv="refresh" content="15">
+        <meta http-equiv="refresh" content="30">
         <style>
             body {{
                 background:#0b1220;
@@ -251,7 +251,7 @@ def ribbon():
     </div>
 
     <h1>{RIBBON_DASHBOARD_TITLE}</h1>
-    <div class="sub">15m Binance Futures Ribbon Trend test paneli. Saatler İstanbul zamanıdır. Sayfa 15 saniyede bir yenilenir.</div>
+    <div class="sub">15m Binance Futures Ribbon Trend test paneli. Saatler İstanbul zamanıdır. Sayfa 30 saniyede bir yenilenir.</div>
 
     <div class="cards">
         <div class="card"><div class="label">Total</div><div class="value">{stats["total_trades"]}</div></div>
