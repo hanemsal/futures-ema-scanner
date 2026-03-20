@@ -62,60 +62,61 @@ def _safe_float(value, default=0.0) -> float:
         return default
 
 
-# -------------------------
-# NEW METRIC
-# -------------------------
+def _parse_dt(value):
+    if not value:
+        return None
 
-def _calc_avg_trade_time(closed_trades: list[dict]) -> float:
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+            if text.endswith("Z"):
+                text = text.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(text)
 
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt
+    except Exception:
+        return None
+
+
+def _calc_avg_trade_time_minutes(closed_trades: list[dict]) -> float:
     durations = []
 
     for t in closed_trades:
+        entry_dt = _parse_dt(t.get("entry_time"))
+        exit_dt = _parse_dt(t.get("exit_time"))
 
-        entry = t.get("entry_time")
-        exit = t.get("exit_time")
-
-        if not entry or not exit:
+        if not entry_dt or not exit_dt:
             continue
 
-        try:
-
-            if entry.endswith("Z"):
-                entry = entry.replace("Z", "+00:00")
-
-            if exit.endswith("Z"):
-                exit = exit.replace("Z", "+00:00")
-
-            entry_dt = datetime.fromisoformat(entry)
-            exit_dt = datetime.fromisoformat(exit)
-
-            duration = (exit_dt - entry_dt).total_seconds()
-
-            durations.append(duration)
-
-        except Exception:
-            continue
+        seconds = (exit_dt - entry_dt).total_seconds()
+        if seconds >= 0:
+            durations.append(seconds)
 
     if not durations:
         return 0.0
 
     avg_seconds = sum(durations) / len(durations)
+    return round(avg_seconds / 60.0, 2)
 
-    return round(avg_seconds / 60, 2)
-
-
-# -------------------------
-# EQUITY CURVE
-# -------------------------
 
 def _build_equity_curve_svg(closed_trades: list[dict], width: int = 1100, height: int = 260) -> str:
-
     if not closed_trades:
-        return ""
+        return f"""
+        <svg viewBox="0 0 {width} {height}" width="100%" height="{height}" xmlns="http://www.w3.org/2000/svg">
+            <rect x="0" y="0" width="{width}" height="{height}" fill="#0f172a" />
+            <text x="{width/2}" y="{height/2}" text-anchor="middle" fill="#94a3b8" font-size="18">
+                Henüz equity curve için kapalı işlem yok
+            </text>
+        </svg>
+        """
 
     equity_values = []
     running = 0.0
-
     for t in closed_trades:
         running += _safe_float(t.get("roi_pct"))
         equity_values.append(running)
@@ -124,164 +125,373 @@ def _build_equity_curve_svg(closed_trades: list[dict], width: int = 1100, height
     max_v = max(equity_values)
 
     if min_v == max_v:
-        min_v -= 1
-        max_v += 1
+        min_v -= 1.0
+        max_v += 1.0
 
     left_pad = 50
     right_pad = 20
     top_pad = 20
     bottom_pad = 35
-
     plot_w = width - left_pad - right_pad
     plot_h = height - top_pad - bottom_pad
 
-    def x_of(i):
-
+    def x_of(i: int) -> float:
         if len(equity_values) == 1:
             return left_pad + plot_w / 2
-
         return left_pad + (i / (len(equity_values) - 1)) * plot_w
 
-    def y_of(v):
-
+    def y_of(v: float) -> float:
         ratio = (v - min_v) / (max_v - min_v)
-
         return top_pad + (1 - ratio) * plot_h
 
-    points = " ".join(
-        f"{x_of(i):.2f},{y_of(v):.2f}"
-        for i, v in enumerate(equity_values)
-    )
+    points = " ".join(f"{x_of(i):.2f},{y_of(v):.2f}" for i, v in enumerate(equity_values))
+
+    zero_y = None
+    if min_v <= 0 <= max_v:
+        zero_y = y_of(0)
 
     last_equity = equity_values[-1]
     last_x = x_of(len(equity_values) - 1)
     last_y = y_of(last_equity)
 
+    y_ticks = []
+    for k in range(5):
+        val = min_v + (max_v - min_v) * (k / 4)
+        y = y_of(val)
+        y_ticks.append((val, y))
+
+    grid_lines = ""
+    labels = ""
+    for val, y in y_ticks:
+        grid_lines += f'<line x1="{left_pad}" y1="{y:.2f}" x2="{width-right_pad}" y2="{y:.2f}" stroke="#1f2937" stroke-width="1" />'
+        labels += f'<text x="{left_pad-8}" y="{y+4:.2f}" text-anchor="end" fill="#94a3b8" font-size="11">{val:.1f}</text>'
+
+    zero_line = ""
+    if zero_y is not None:
+        zero_line = f'<line x1="{left_pad}" y1="{zero_y:.2f}" x2="{width-right_pad}" y2="{zero_y:.2f}" stroke="#475569" stroke-dasharray="4 4" stroke-width="1.2" />'
+
     return f"""
-    <svg viewBox="0 0 {width} {height}" width="100%" height="{height}">
+    <svg viewBox="0 0 {width} {height}" width="100%" height="{height}" xmlns="http://www.w3.org/2000/svg">
+        <rect x="0" y="0" width="{width}" height="{height}" rx="12" ry="12" fill="#0f172a" />
+        {grid_lines}
+        {zero_line}
+        {labels}
         <polyline
             fill="none"
             stroke="#22c55e"
             stroke-width="3"
             points="{points}"
+            stroke-linejoin="round"
+            stroke-linecap="round"
         />
-        <circle cx="{last_x}" cy="{last_y}" r="4" fill="#22c55e" />
+        <circle cx="{last_x:.2f}" cy="{last_y:.2f}" r="4.5" fill="#22c55e" />
+        <text x="{last_x-10:.2f}" y="{last_y-12:.2f}" text-anchor="end" fill="#e5e7eb" font-size="12">
+            {last_equity:.2f}%
+        </text>
+        <text x="{width/2}" y="16" text-anchor="middle" fill="#cbd5e1" font-size="14">
+            Equity Curve (Kapalı İşlemler Birikimli ROI)
+        </text>
+        <text x="{width/2}" y="{height-8}" text-anchor="middle" fill="#94a3b8" font-size="11">
+            İşlem Sırası
+        </text>
     </svg>
     """
 
 
-# -------------------------
-# STREAK
-# -------------------------
-
-def _calc_streaks(closed_trades):
-
+def _calc_streaks(closed_trades: list[dict]) -> tuple[int, int]:
     max_win = 0
     max_loss = 0
-
     cur_win = 0
     cur_loss = 0
 
     for t in closed_trades:
-
         roi = _safe_float(t.get("roi_pct"))
-
         if roi > 0:
-
             cur_win += 1
             cur_loss = 0
-
         else:
-
             cur_loss += 1
             cur_win = 0
 
         if cur_win > max_win:
             max_win = cur_win
-
         if cur_loss > max_loss:
             max_loss = cur_loss
 
     return max_win, max_loss
 
 
+@app.route("/")
+def home():
+    return f"""
+    <html>
+    <head>
+      <title>Trading Panels</title>
+      <style>
+        body {{
+            background:#0f172a;
+            color:white;
+            font-family:Arial, sans-serif;
+            padding:40px;
+        }}
+        .card {{
+            background:#111827;
+            padding:25px;
+            border-radius:15px;
+            margin:10px 0;
+            border:1px solid #1f2937;
+        }}
+        a {{
+            color:white;
+            text-decoration:none;
+        }}
+        .btn {{
+            display:inline-block;
+            margin-top:10px;
+            padding:10px 14px;
+            border-radius:10px;
+            background:#2563eb;
+        }}
+        .btn.secondary {{
+            background:#059669;
+        }}
+      </style>
+    </head>
+    <body>
+      <h1>Trading Panels</h1>
+
+      <div class="card">
+        <h2>EMA Scanner</h2>
+        <a class="btn" href="{PUMP_DASHBOARD_URL}" target="_blank">Aç</a>
+      </div>
+
+      <div class="card">
+        <h2>Ribbon System</h2>
+        <a class="btn secondary" href="/ribbon">Aç</a>
+      </div>
+    </body>
+    </html>
+    """
+
+
 @app.route("/ribbon")
 def ribbon():
-
     init_db()
+
+    side = request.args.get("side", "all")
+    status = request.args.get("status", "all")
 
     stats = fetch_stats()
     trades = fetch_trades(limit=500)
 
-    closed_trades = [
-        t for t in reversed(trades)
-        if t.get("status") == "closed"
-    ]
+    if side != "all":
+        trades = [t for t in trades if t["side"] == side]
 
-    max_win_streak, max_losing_streak = _calc_streaks(closed_trades)
+    if status != "all":
+        trades = [t for t in trades if t["status"] == status]
 
-    avg_trade_time = _calc_avg_trade_time(closed_trades)
+    all_trades = fetch_trades(limit=500)
+    closed_trades_for_stats = [t for t in reversed(all_trades) if t.get("status") == "closed"]
 
-    equity_curve_svg = _build_equity_curve_svg(closed_trades)
+    closed_long_count = sum(1 for t in all_trades if t.get("status") == "closed" and t.get("side") == "long")
+    closed_short_count = sum(1 for t in all_trades if t.get("status") == "closed" and t.get("side") == "short")
+
+    max_win_streak, max_losing_streak = _calc_streaks(closed_trades_for_stats)
+    avg_trade_time_min = _calc_avg_trade_time_minutes(closed_trades_for_stats)
+    equity_curve_svg = _build_equity_curve_svg(closed_trades_for_stats)
 
     rows = ""
-
     for t in trades:
+        roi_val = None if t.get("roi_pct") is None else float(t["roi_pct"])
+        pnl_val = None if t.get("pnl_pct") is None else float(t["pnl_pct"])
+
+        roi_color = "#22c55e" if roi_val is not None and roi_val > 0 else "#ef4444" if roi_val is not None and roi_val < 0 else "#e5e7eb"
+        pnl_color = "#22c55e" if pnl_val is not None and pnl_val > 0 else "#ef4444" if pnl_val is not None and pnl_val < 0 else "#e5e7eb"
+
+        side_badge = "#16a34a" if t["side"] == "long" else "#dc2626"
+        status_badge = "#2563eb" if t["status"] == "open" else "#6b7280"
 
         rows += f"""
         <tr>
+            <td>{t['id']}</td>
             <td>{t['symbol']}</td>
-            <td>{t['side']}</td>
-            <td>{_fmt_pct(t.get('roi_pct'))}</td>
+            <td><span class="badge" style="background:{side_badge}">{t['side'].upper()}</span></td>
+            <td><span class="badge" style="background:{status_badge}">{t['status'].upper()}</span></td>
+            <td>{_fmt_price(t.get('entry_price'))}</td>
+            <td>{_fmt_price(t.get('tp_price'))}</td>
+            <td>{_fmt_price(t.get('sl_price'))}</td>
+            <td>{_fmt_price(t.get('exit_price'))}</td>
+            <td style="color:{pnl_color}">{_fmt_pct(t.get('pnl_pct'))}</td>
+            <td style="color:{roi_color}">{_fmt_pct(t.get('roi_pct'))}</td>
             <td>{_to_istanbul_time(t.get('entry_time'))}</td>
             <td>{_to_istanbul_time(t.get('exit_time'))}</td>
+            <td>{_fmt_text(t.get('close_reason'))}</td>
         </tr>
         """
 
     return f"""
+    <html>
+    <head>
+        <title>{RIBBON_DASHBOARD_TITLE}</title>
+        <meta http-equiv="refresh" content="30">
+        <style>
+            body {{
+                background:#0b1220;
+                color:white;
+                font-family:Arial, sans-serif;
+                padding:20px;
+                margin:0;
+            }}
+            h1 {{
+                margin:0 0 8px 0;
+            }}
+            .sub {{
+                color:#9ca3af;
+                margin-bottom:18px;
+            }}
+            .cards {{
+                display:grid;
+                grid-template-columns:repeat(4,1fr);
+                gap:12px;
+                margin-bottom:20px;
+            }}
+            .card {{
+                background:#111827;
+                padding:16px;
+                border-radius:12px;
+                border:1px solid #1f2937;
+            }}
+            .card .label {{
+                font-size:12px;
+                color:#9ca3af;
+                margin-bottom:8px;
+            }}
+            .card .value {{
+                font-size:28px;
+                font-weight:700;
+            }}
+            .filters {{
+                margin:14px 0 18px 0;
+            }}
+            .filters a {{
+                color:#8ab4ff;
+                margin-right:10px;
+                text-decoration:none;
+                font-weight:600;
+            }}
+            table {{
+                width:100%;
+                border-collapse:collapse;
+                background:#0f172a;
+            }}
+            th, td {{
+                padding:10px 8px;
+                border-bottom:1px solid #1f2937;
+                font-size:13px;
+                text-align:left;
+                white-space:nowrap;
+            }}
+            th {{
+                background:#111827;
+                position:sticky;
+                top:0;
+                z-index:2;
+            }}
+            .badge {{
+                display:inline-block;
+                padding:4px 8px;
+                border-radius:999px;
+                font-size:11px;
+                font-weight:700;
+                color:white;
+            }}
+            .top-links {{
+                margin-bottom:12px;
+            }}
+            .top-links a {{
+                color:#93c5fd;
+                text-decoration:none;
+            }}
+            .table-wrap {{
+                overflow-x:auto;
+                border:1px solid #1f2937;
+                border-radius:12px;
+            }}
+            .chart-card {{
+                background:#111827;
+                border:1px solid #1f2937;
+                border-radius:12px;
+                padding:14px;
+                margin-bottom:20px;
+            }}
+        </style>
+    </head>
+    <body>
 
-<html>
+    <div class="top-links">
+        <a href="/">⬅ Ana Ekran</a>
+    </div>
 
-<body style="background:#0b1220;color:white;font-family:Arial;padding:20px">
+    <h1>{RIBBON_DASHBOARD_TITLE}</h1>
+    <div class="sub">15m Binance Futures Ribbon Trend test paneli. Saatler İstanbul zamanıdır. Sayfa 30 saniyede bir yenilenir.</div>
 
-<h1>{RIBBON_DASHBOARD_TITLE}</h1>
+    <div class="cards">
+        <div class="card"><div class="label">Total</div><div class="value">{stats["total_trades"]}</div></div>
+        <div class="card"><div class="label">Open</div><div class="value">{stats["open_trades"]}</div></div>
+        <div class="card"><div class="label">Closed</div><div class="value">{stats["closed_trades"]}</div></div>
+        <div class="card"><div class="label">Win Rate</div><div class="value">{stats["win_rate"]}%</div></div>
 
-<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px">
+        <div class="card"><div class="label">ROI</div><div class="value">{stats["total_roi"]}%</div></div>
+        <div class="card"><div class="label">Avg ROI</div><div class="value">{stats["avg_roi"]}%</div></div>
+        <div class="card"><div class="label">Long</div><div class="value">{stats["long_count"]}</div></div>
+        <div class="card"><div class="label">Short</div><div class="value">{stats["short_count"]}</div></div>
 
-<div>Trades<br><b>{stats["total_trades"]}</b></div>
-<div>Closed<br><b>{stats["closed_trades"]}</b></div>
-<div>Win Rate<br><b>{stats["win_rate"]}%</b></div>
-<div>Avg ROI<br><b>{stats["avg_roi"]}%</b></div>
-<div>Avg Trade Time<br><b>{avg_trade_time} min</b></div>
+        <div class="card"><div class="label">Closed Long</div><div class="value">{closed_long_count}</div></div>
+        <div class="card"><div class="label">Closed Short</div><div class="value">{closed_short_count}</div></div>
+        <div class="card"><div class="label">Long Win Rate</div><div class="value">{stats["long_win_rate"]}%</div></div>
+        <div class="card"><div class="label">Short Win Rate</div><div class="value">{stats["short_win_rate"]}%</div></div>
 
-<div>Max Win Streak<br><b>{max_win_streak}</b></div>
-<div>Max Loss Streak<br><b>{max_losing_streak}</b></div>
+        <div class="card"><div class="label">Max Winning Streak</div><div class="value">{max_win_streak}</div></div>
+        <div class="card"><div class="label">Max Losing Streak</div><div class="value">{max_losing_streak}</div></div>
+        <div class="card"><div class="label">Avg Trade Time</div><div class="value">{avg_trade_time_min} min</div></div>
+    </div>
 
-</div>
+    <div class="chart-card">
+        {equity_curve_svg}
+    </div>
 
-<br><br>
+    <div class="filters">
+        <a href="/ribbon?side=all&status=all">All</a>
+        <a href="/ribbon?side=long&status=all">Long</a>
+        <a href="/ribbon?side=short&status=all">Short</a>
+        <a href="/ribbon?side=all&status=open">Open</a>
+        <a href="/ribbon?side=all&status=closed">Closed</a>
+    </div>
 
-{equity_curve_svg}
+    <div class="table-wrap">
+        <table>
+            <tr>
+                <th>ID</th>
+                <th>Coin</th>
+                <th>Side</th>
+                <th>Status</th>
+                <th>Entry</th>
+                <th>TP</th>
+                <th>SL</th>
+                <th>Exit</th>
+                <th>PnL</th>
+                <th>ROI</th>
+                <th>Entry Time (İstanbul)</th>
+                <th>Exit Time (İstanbul)</th>
+                <th>Close Reason</th>
+            </tr>
+            {rows}
+        </table>
+    </div>
 
-<table border="1" cellpadding="6">
-
-<tr>
-<th>Coin</th>
-<th>Side</th>
-<th>ROI</th>
-<th>Entry</th>
-<th>Exit</th>
-</tr>
-
-{rows}
-
-</table>
-
-</body>
-
-</html>
-
-"""
+    </body>
+    </html>
+    """
 
 
 if __name__ == "__main__":
