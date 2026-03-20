@@ -53,6 +53,132 @@ def _fmt_text(value) -> str:
     return str(value)
 
 
+def _safe_float(value, default=0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _build_equity_curve_svg(closed_trades: list[dict], width: int = 1100, height: int = 260) -> str:
+    if not closed_trades:
+        return f"""
+        <svg viewBox="0 0 {width} {height}" width="100%" height="{height}" xmlns="http://www.w3.org/2000/svg">
+            <rect x="0" y="0" width="{width}" height="{height}" fill="#0f172a" />
+            <text x="{width/2}" y="{height/2}" text-anchor="middle" fill="#94a3b8" font-size="18">
+                Henüz equity curve için kapalı işlem yok
+            </text>
+        </svg>
+        """
+
+    equity_values = []
+    running = 0.0
+    for t in closed_trades:
+        running += _safe_float(t.get("roi_pct"))
+        equity_values.append(running)
+
+    min_v = min(equity_values)
+    max_v = max(equity_values)
+
+    if min_v == max_v:
+        min_v -= 1.0
+        max_v += 1.0
+
+    left_pad = 50
+    right_pad = 20
+    top_pad = 20
+    bottom_pad = 35
+    plot_w = width - left_pad - right_pad
+    plot_h = height - top_pad - bottom_pad
+
+    def x_of(i: int) -> float:
+        if len(equity_values) == 1:
+            return left_pad + plot_w / 2
+        return left_pad + (i / (len(equity_values) - 1)) * plot_w
+
+    def y_of(v: float) -> float:
+        ratio = (v - min_v) / (max_v - min_v)
+        return top_pad + (1 - ratio) * plot_h
+
+    points = " ".join(f"{x_of(i):.2f},{y_of(v):.2f}" for i, v in enumerate(equity_values))
+
+    zero_y = None
+    if min_v <= 0 <= max_v:
+        zero_y = y_of(0)
+
+    last_equity = equity_values[-1]
+    last_x = x_of(len(equity_values) - 1)
+    last_y = y_of(last_equity)
+
+    y_ticks = []
+    for k in range(5):
+        val = min_v + (max_v - min_v) * (k / 4)
+        y = y_of(val)
+        y_ticks.append((val, y))
+
+    grid_lines = ""
+    labels = ""
+    for val, y in y_ticks:
+        grid_lines += f'<line x1="{left_pad}" y1="{y:.2f}" x2="{width-right_pad}" y2="{y:.2f}" stroke="#1f2937" stroke-width="1" />'
+        labels += f'<text x="{left_pad-8}" y="{y+4:.2f}" text-anchor="end" fill="#94a3b8" font-size="11">{val:.1f}</text>'
+
+    zero_line = ""
+    if zero_y is not None:
+        zero_line = f'<line x1="{left_pad}" y1="{zero_y:.2f}" x2="{width-right_pad}" y2="{zero_y:.2f}" stroke="#475569" stroke-dasharray="4 4" stroke-width="1.2" />'
+
+    return f"""
+    <svg viewBox="0 0 {width} {height}" width="100%" height="{height}" xmlns="http://www.w3.org/2000/svg">
+        <rect x="0" y="0" width="{width}" height="{height}" rx="12" ry="12" fill="#0f172a" />
+        {grid_lines}
+        {zero_line}
+        {labels}
+        <polyline
+            fill="none"
+            stroke="#22c55e"
+            stroke-width="3"
+            points="{points}"
+            stroke-linejoin="round"
+            stroke-linecap="round"
+        />
+        <circle cx="{last_x:.2f}" cy="{last_y:.2f}" r="4.5" fill="#22c55e" />
+        <text x="{last_x-10:.2f}" y="{last_y-12:.2f}" text-anchor="end" fill="#e5e7eb" font-size="12">
+            {last_equity:.2f}%
+        </text>
+        <text x="{width/2}" y="16" text-anchor="middle" fill="#cbd5e1" font-size="14">
+            Equity Curve (Kapalı İşlemler Birikimli ROI)
+        </text>
+        <text x="{width/2}" y="{height-8}" text-anchor="middle" fill="#94a3b8" font-size="11">
+            İşlem Sırası
+        </text>
+    </svg>
+    """
+
+
+def _calc_streaks(closed_trades: list[dict]) -> tuple[int, int]:
+    max_win = 0
+    max_loss = 0
+    cur_win = 0
+    cur_loss = 0
+
+    for t in closed_trades:
+        roi = _safe_float(t.get("roi_pct"))
+        if roi > 0:
+            cur_win += 1
+            cur_loss = 0
+        else:
+            cur_loss += 1
+            cur_win = 0
+
+        if cur_win > max_win:
+            max_win = cur_win
+        if cur_loss > max_loss:
+            max_loss = cur_loss
+
+    return max_win, max_loss
+
+
 @app.route("/")
 def home():
     return f"""
@@ -122,8 +248,14 @@ def ribbon():
     if status != "all":
         trades = [t for t in trades if t["status"] == status]
 
-    closed_long_count = sum(1 for t in trades if t.get("status") == "closed" and t.get("side") == "long")
-    closed_short_count = sum(1 for t in trades if t.get("status") == "closed" and t.get("side") == "short")
+    all_trades = fetch_trades(limit=500)
+    closed_trades_for_stats = [t for t in reversed(all_trades) if t.get("status") == "closed"]
+
+    closed_long_count = sum(1 for t in all_trades if t.get("status") == "closed" and t.get("side") == "long")
+    closed_short_count = sum(1 for t in all_trades if t.get("status") == "closed" and t.get("side") == "short")
+
+    max_win_streak, max_losing_streak = _calc_streaks(closed_trades_for_stats)
+    equity_curve_svg = _build_equity_curve_svg(closed_trades_for_stats)
 
     rows = ""
     for t in trades:
@@ -242,6 +374,13 @@ def ribbon():
                 border:1px solid #1f2937;
                 border-radius:12px;
             }}
+            .chart-card {{
+                background:#111827;
+                border:1px solid #1f2937;
+                border-radius:12px;
+                padding:14px;
+                margin-bottom:20px;
+            }}
         </style>
     </head>
     <body>
@@ -268,6 +407,13 @@ def ribbon():
         <div class="card"><div class="label">Closed Short</div><div class="value">{closed_short_count}</div></div>
         <div class="card"><div class="label">Long Win Rate</div><div class="value">{stats["long_win_rate"]}%</div></div>
         <div class="card"><div class="label">Short Win Rate</div><div class="value">{stats["short_win_rate"]}%</div></div>
+
+        <div class="card"><div class="label">Max Winning Streak</div><div class="value">{max_win_streak}</div></div>
+        <div class="card"><div class="label">Max Losing Streak</div><div class="value">{max_losing_streak}</div></div>
+    </div>
+
+    <div class="chart-card">
+        {equity_curve_svg}
     </div>
 
     <div class="filters">
