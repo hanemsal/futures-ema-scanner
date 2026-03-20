@@ -1,10 +1,38 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 from flask import Flask, request
+
 from config import DASHBOARD_HOST, DASHBOARD_PORT, PUMP_DASHBOARD_URL, RIBBON_DASHBOARD_TITLE
 from db import fetch_stats, fetch_trades, init_db
 
 app = Flask(__name__)
+
+ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
+
+
+def _to_istanbul_time(value) -> str:
+    if not value:
+        return "-"
+
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+            if text.endswith("Z"):
+                text = text.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(text)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        dt_local = dt.astimezone(ISTANBUL_TZ)
+        return dt_local.strftime("%d.%m.%Y %H:%M:%S")
+    except Exception:
+        return str(value)
 
 
 @app.route("/")
@@ -52,8 +80,11 @@ def ribbon():
     if status != "all":
         trades = [t for t in trades if t["status"] == status]
 
-    def fmt(v):
+    def fmt_pct(v):
         return "-" if v is None else f"{float(v):.2f}%"
+
+    def fmt_price(v):
+        return "-" if v is None else f"{float(v):.6f}"
 
     rows = ""
     for t in trades:
@@ -63,12 +94,14 @@ def ribbon():
             <td>{t['symbol']}</td>
             <td>{t['side']}</td>
             <td>{t['status']}</td>
-            <td>{t['entry_price']:.6f}</td>
-            <td>{t['tp_price']:.6f}</td>
-            <td>{t['sl_price']:.6f}</td>
-            <td>{'-' if not t['exit_price'] else f"{t['exit_price']:.6f}"}</td>
-            <td>{fmt(t.get('pnl_pct'))}</td>
-            <td>{fmt(t.get('roi_pct'))}</td>
+            <td>{fmt_price(t.get('entry_price'))}</td>
+            <td>{fmt_price(t.get('tp_price'))}</td>
+            <td>{fmt_price(t.get('sl_price'))}</td>
+            <td>{fmt_price(t.get('exit_price'))}</td>
+            <td>{fmt_pct(t.get('pnl_pct'))}</td>
+            <td>{fmt_pct(t.get('roi_pct'))}</td>
+            <td>{_to_istanbul_time(t.get('entry_time'))}</td>
+            <td>{_to_istanbul_time(t.get('exit_time'))}</td>
         </tr>
         """
 
@@ -78,12 +111,41 @@ def ribbon():
         <title>{RIBBON_DASHBOARD_TITLE}</title>
         <meta http-equiv="refresh" content="15">
         <style>
-            body {{ background:#0b1220; color:white; font-family:Arial; padding:20px }}
-            table {{ width:100%; border-collapse:collapse }}
-            th, td {{ padding:8px; border-bottom:1px solid #333 }}
-            th {{ background:#111 }}
-            .cards {{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px }}
-            .card {{ background:#111827; padding:15px; border-radius:10px }}
+            body {{
+                background:#0b1220;
+                color:white;
+                font-family:Arial;
+                padding:20px;
+            }}
+            table {{
+                width:100%;
+                border-collapse:collapse;
+            }}
+            th, td {{
+                padding:8px;
+                border-bottom:1px solid #333;
+                font-size:13px;
+            }}
+            th {{
+                background:#111;
+                position:sticky;
+                top:0;
+            }}
+            .cards {{
+                display:grid;
+                grid-template-columns:repeat(4,1fr);
+                gap:10px;
+            }}
+            .card {{
+                background:#111827;
+                padding:15px;
+                border-radius:10px;
+            }}
+            .filters a {{
+                color:#8ab4ff;
+                margin-right:10px;
+                text-decoration:none;
+            }}
         </style>
     </head>
 
@@ -100,17 +162,21 @@ def ribbon():
         <div class="card">Avg ROI: {stats["avg_roi"]}%</div>
         <div class="card">Long: {stats["long_count"]}</div>
         <div class="card">Short: {stats["short_count"]}</div>
+        <div class="card">Closed Long Win Rate: {stats["long_win_rate"]}%</div>
+        <div class="card">Closed Short Win Rate: {stats["short_win_rate"]}%</div>
     </div>
 
     <br>
 
-    <a href="/ribbon?side=all">All</a> |
-    <a href="/ribbon?side=long">Long</a> |
-    <a href="/ribbon?side=short">Short</a> |
-    <a href="/ribbon?status=open">Open</a> |
-    <a href="/ribbon?status=closed">Closed</a>
+    <div class="filters">
+        <a href="/ribbon?side=all&status=all">All</a>
+        <a href="/ribbon?side=long&status=all">Long</a>
+        <a href="/ribbon?side=short&status=all">Short</a>
+        <a href="/ribbon?side=all&status=open">Open</a>
+        <a href="/ribbon?side=all&status=closed">Closed</a>
+    </div>
 
-    <br><br>
+    <br>
 
     <table>
         <tr>
@@ -124,6 +190,8 @@ def ribbon():
             <th>Exit</th>
             <th>PnL</th>
             <th>ROI</th>
+            <th>Entry Time (İstanbul)</th>
+            <th>Exit Time (İstanbul)</th>
         </tr>
 
         {rows}
