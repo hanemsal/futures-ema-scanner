@@ -14,7 +14,7 @@ except Exception:
 
 def _get_sqlite_path() -> str:
     try:
-        from config import DB_PATH  # optional
+        from config import DB_PATH
         return DB_PATH
     except Exception:
         return "ribbon_signals.db"
@@ -84,6 +84,17 @@ def _fetchall(cur):
     return out
 
 
+def _sqlite_has_column(conn, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    names = []
+    for row in rows:
+        if isinstance(row, dict):
+            names.append(row["name"])
+        else:
+            names.append(row[1])
+    return column_name in names
+
+
 def init_db() -> None:
     if USE_POSTGRES:
         with get_conn() as conn:
@@ -118,9 +129,13 @@ def init_db() -> None:
                     entry_note TEXT,
                     max_favor_pct DOUBLE PRECISION DEFAULT 0,
                     max_adverse_pct DOUBLE PRECISION DEFAULT 0,
-                    close_reason TEXT
+                    close_reason TEXT,
+                    recovery_mode BOOLEAN DEFAULT FALSE
                 )
                 """
+            )
+            cur.execute(
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS recovery_mode BOOLEAN DEFAULT FALSE"
             )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades(symbol, status)"
@@ -160,10 +175,15 @@ def init_db() -> None:
                     entry_note TEXT,
                     max_favor_pct REAL DEFAULT 0,
                     max_adverse_pct REAL DEFAULT 0,
-                    close_reason TEXT
+                    close_reason TEXT,
+                    recovery_mode INTEGER DEFAULT 0
                 )
                 """
             )
+            if not _sqlite_has_column(conn, "trades", "recovery_mode"):
+                conn.execute(
+                    "ALTER TABLE trades ADD COLUMN recovery_mode INTEGER DEFAULT 0"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades(symbol, status)"
             )
@@ -223,20 +243,15 @@ def update_trade(trade_id: int, payload: Dict[str, Any]) -> None:
 
 
 def fetch_open_trades() -> List[Dict[str, Any]]:
+    query = "SELECT * FROM trades WHERE status = 'open' ORDER BY entry_time ASC"
     if USE_POSTGRES:
         with get_conn() as conn:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute(
-                "SELECT * FROM trades WHERE status = 'open' ORDER BY entry_time ASC"
-            )
+            cur.execute(query)
             return _fetchall(cur)
     else:
         with get_conn() as conn:
-            return list(
-                conn.execute(
-                    "SELECT * FROM trades WHERE status = 'open' ORDER BY entry_time ASC"
-                ).fetchall()
-            )
+            return list(conn.execute(query).fetchall())
 
 
 def fetch_open_trade_for_symbol_side(symbol: str, side: str) -> Optional[Dict[str, Any]]:
@@ -306,10 +321,10 @@ def fetch_stats() -> Dict[str, Any]:
             cur.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed'")
             closed_n = _fetchone(cur)["n"]
 
-            cur.execute("SELECT COUNT(*) AS n FROM trades WHERE result='tp'")
+            cur.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND COALESCE(roi_pct, 0) > 0")
             winners = _fetchone(cur)["n"]
 
-            cur.execute("SELECT COUNT(*) AS n FROM trades WHERE result='sl'")
+            cur.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND COALESCE(roi_pct, 0) <= 0")
             losers = _fetchone(cur)["n"]
 
             cur.execute("SELECT COUNT(*) AS n FROM trades WHERE side='long'")
@@ -332,10 +347,10 @@ def fetch_stats() -> Dict[str, Any]:
             cur.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='short'")
             short_closed = _fetchone(cur)["n"]
 
-            cur.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='long' AND result='tp'")
+            cur.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='long' AND COALESCE(roi_pct, 0) > 0")
             long_win = _fetchone(cur)["n"]
 
-            cur.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='short' AND result='tp'")
+            cur.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='short' AND COALESCE(roi_pct, 0) > 0")
             short_win = _fetchone(cur)["n"]
 
     else:
@@ -343,8 +358,12 @@ def fetch_stats() -> Dict[str, Any]:
             total = conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()["n"]
             open_n = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE status='open'").fetchone()["n"]
             closed_n = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE status='closed'").fetchone()["n"]
-            winners = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE result='tp'").fetchone()["n"]
-            losers = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE result='sl'").fetchone()["n"]
+            winners = conn.execute(
+                "SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND COALESCE(roi_pct, 0) > 0"
+            ).fetchone()["n"]
+            losers = conn.execute(
+                "SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND COALESCE(roi_pct, 0) <= 0"
+            ).fetchone()["n"]
             longs = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE side='long'").fetchone()["n"]
             shorts = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE side='short'").fetchone()["n"]
             total_roi = conn.execute(
@@ -362,10 +381,10 @@ def fetch_stats() -> Dict[str, Any]:
                 "SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='short'"
             ).fetchone()["n"]
             long_win = conn.execute(
-                "SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='long' AND result='tp'"
+                "SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='long' AND COALESCE(roi_pct, 0) > 0"
             ).fetchone()["n"]
             short_win = conn.execute(
-                "SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='short' AND result='tp'"
+                "SELECT COUNT(*) AS n FROM trades WHERE status='closed' AND side='short' AND COALESCE(roi_pct, 0) > 0"
             ).fetchone()["n"]
 
     return {
