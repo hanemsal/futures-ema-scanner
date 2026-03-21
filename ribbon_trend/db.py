@@ -130,12 +130,28 @@ def init_db() -> None:
                     max_favor_pct DOUBLE PRECISION DEFAULT 0,
                     max_adverse_pct DOUBLE PRECISION DEFAULT 0,
                     close_reason TEXT,
-                    recovery_mode BOOLEAN DEFAULT FALSE
+                    recovery_mode BOOLEAN DEFAULT FALSE,
+                    current_price DOUBLE PRECISION,
+                    floating_pnl_pct DOUBLE PRECISION DEFAULT 0,
+                    floating_roi_pct DOUBLE PRECISION DEFAULT 0,
+                    last_price_time TEXT
                 )
                 """
             )
             cur.execute(
                 "ALTER TABLE trades ADD COLUMN IF NOT EXISTS recovery_mode BOOLEAN DEFAULT FALSE"
+            )
+            cur.execute(
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS current_price DOUBLE PRECISION"
+            )
+            cur.execute(
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS floating_pnl_pct DOUBLE PRECISION DEFAULT 0"
+            )
+            cur.execute(
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS floating_roi_pct DOUBLE PRECISION DEFAULT 0"
+            )
+            cur.execute(
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS last_price_time TEXT"
             )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades(symbol, status)"
@@ -176,13 +192,33 @@ def init_db() -> None:
                     max_favor_pct REAL DEFAULT 0,
                     max_adverse_pct REAL DEFAULT 0,
                     close_reason TEXT,
-                    recovery_mode INTEGER DEFAULT 0
+                    recovery_mode INTEGER DEFAULT 0,
+                    current_price REAL,
+                    floating_pnl_pct REAL DEFAULT 0,
+                    floating_roi_pct REAL DEFAULT 0,
+                    last_price_time TEXT
                 )
                 """
             )
             if not _sqlite_has_column(conn, "trades", "recovery_mode"):
                 conn.execute(
                     "ALTER TABLE trades ADD COLUMN recovery_mode INTEGER DEFAULT 0"
+                )
+            if not _sqlite_has_column(conn, "trades", "current_price"):
+                conn.execute(
+                    "ALTER TABLE trades ADD COLUMN current_price REAL"
+                )
+            if not _sqlite_has_column(conn, "trades", "floating_pnl_pct"):
+                conn.execute(
+                    "ALTER TABLE trades ADD COLUMN floating_pnl_pct REAL DEFAULT 0"
+                )
+            if not _sqlite_has_column(conn, "trades", "floating_roi_pct"):
+                conn.execute(
+                    "ALTER TABLE trades ADD COLUMN floating_roi_pct REAL DEFAULT 0"
+                )
+            if not _sqlite_has_column(conn, "trades", "last_price_time"):
+                conn.execute(
+                    "ALTER TABLE trades ADD COLUMN last_price_time TEXT"
                 )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades(symbol, status)"
