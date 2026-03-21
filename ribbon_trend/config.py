@@ -20,10 +20,26 @@ EMA_FAST = 20
 EMA_MID = 50
 EMA_SLOW = 100
 EMA_TREND = 200
+
 EMA200_SLOPE_LOOKBACK = int(os.getenv("RIBBON_EMA200_SLOPE_LOOKBACK", "3"))
+
+# Maksimum extension: fiyat EMA20'den çok uzaksa alma
 MAX_EXTENSION_PCT = float(os.getenv("RIBBON_MAX_EXTENSION_PCT", "3.0"))
+
+# Minimum extension: fiyat yeterince ayrışmadıysa alma
+MIN_EXTENSION_PCT = float(os.getenv("RIBBON_MIN_EXTENSION_PCT", "1.2"))
+
+# EMA200 slope mutlak minimum güç
+MIN_EMA200_SLOPE_PCT = float(os.getenv("RIBBON_MIN_EMA200_SLOPE_PCT", "0.05"))
+
+# Ribbon expansion minimum açıklık (%)
+# Formül: abs(ema20 - ema50) / close * 100
+MIN_RIBBON_EXPANSION_PCT = float(os.getenv("RIBBON_MIN_RIBBON_EXPANSION_PCT", "0.20"))
+
 MIN_CANDLE_BODY_PCT = float(os.getenv("RIBBON_MIN_CANDLE_BODY_PCT", "0.15"))
-MIN_NOTIONAL_24H_USDT = float(os.getenv("RIBBON_MIN_NOTIONAL_24H_USDT", "1500000"))
+
+# 24h notional volume filtresi
+MIN_NOTIONAL_24H_USDT = float(os.getenv("RIBBON_MIN_NOTIONAL_24H_USDT", "10000000"))
 
 # ----- Risk / TP / SL -----
 LEVERAGE = float(os.getenv("RIBBON_LEVERAGE", "5"))
