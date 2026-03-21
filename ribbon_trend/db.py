@@ -131,6 +131,7 @@ def init_db() -> None:
                     max_adverse_pct DOUBLE PRECISION DEFAULT 0,
                     close_reason TEXT,
                     recovery_mode BOOLEAN DEFAULT FALSE,
+                    recovery_mode_time TEXT,
                     current_price DOUBLE PRECISION,
                     floating_pnl_pct DOUBLE PRECISION DEFAULT 0,
                     floating_roi_pct DOUBLE PRECISION DEFAULT 0,
@@ -140,6 +141,9 @@ def init_db() -> None:
             )
             cur.execute(
                 "ALTER TABLE trades ADD COLUMN IF NOT EXISTS recovery_mode BOOLEAN DEFAULT FALSE"
+            )
+            cur.execute(
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS recovery_mode_time TEXT"
             )
             cur.execute(
                 "ALTER TABLE trades ADD COLUMN IF NOT EXISTS current_price DOUBLE PRECISION"
@@ -159,6 +163,7 @@ def init_db() -> None:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)"
             )
+
     else:
         with get_conn() as conn:
             conn.execute(
@@ -193,6 +198,7 @@ def init_db() -> None:
                     max_adverse_pct REAL DEFAULT 0,
                     close_reason TEXT,
                     recovery_mode INTEGER DEFAULT 0,
+                    recovery_mode_time TEXT,
                     current_price REAL,
                     floating_pnl_pct REAL DEFAULT 0,
                     floating_roi_pct REAL DEFAULT 0,
@@ -203,6 +209,10 @@ def init_db() -> None:
             if not _sqlite_has_column(conn, "trades", "recovery_mode"):
                 conn.execute(
                     "ALTER TABLE trades ADD COLUMN recovery_mode INTEGER DEFAULT 0"
+                )
+            if not _sqlite_has_column(conn, "trades", "recovery_mode_time"):
+                conn.execute(
+                    "ALTER TABLE trades ADD COLUMN recovery_mode_time TEXT"
                 )
             if not _sqlite_has_column(conn, "trades", "current_price"):
                 conn.execute(
