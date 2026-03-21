@@ -239,7 +239,7 @@ class RibbonWorker:
                     "ema100": round(signal.ema100, 10),
                     "ema200": round(signal.ema200, 10),
                     "ema200_slope_pct": signal.ema200_slope_pct,
-                    "entry_note": "ribbon_signal_v2_no_hard_sl",
+                    "entry_note": "ribbon_signal_v3_filtered",
                     "max_favor_pct": 0.0,
                     "max_adverse_pct": 0.0,
                     "recovery_mode": False,
