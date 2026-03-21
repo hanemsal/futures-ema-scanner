@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Optional
 
-from config import DRY_RUN, LOOP_SLEEP_SECONDS, RELOAD_MARKETS_EVERY_MINUTES, LEVERAGE, TIMEFRAME, TP_MOVE_PCT
+from config import (
+    DRY_RUN,
+    LOOP_SLEEP_SECONDS,
+    RELOAD_MARKETS_EVERY_MINUTES,
+    LEVERAGE,
+    TIMEFRAME,
+    TP_MOVE_PCT,
+)
 from db import fetch_open_trades, init_db, insert_trade, update_trade
 from scanner import BinanceFuturesScanner
 from strategy import evaluate_signal
@@ -14,9 +21,19 @@ from utils import pct_change, setup_logger
 
 logger = setup_logger("ribbon.worker")
 
+# Ana TP
 TP_ROI_TARGET = 10.0
-RECOVERY_TRIGGER_ROI = -15.0
-RECOVERY_EXIT_ROI = 1.0
+
+# Recovery
+RECOVERY_TRIGGER_ROI = -12.0
+RECOVERY_EXIT_ROI = 2.0
+
+# Zaman bazlı exitler
+EARLY_FAILURE_BARS = 8
+EARLY_FAILURE_MIN_FAVOR_PCT = 0.6
+
+MAX_HOLD_BARS = 24
+RECOVERY_TIMEOUT_BARS = 12
 
 
 def _calc_tp_price(entry_price: float, side: str) -> float:
@@ -26,12 +43,56 @@ def _calc_tp_price(entry_price: float, side: str) -> float:
     return entry_price * (1 - tp_move)
 
 
+def _parse_timeframe_to_minutes(timeframe: str) -> int:
+    tf = (timeframe or "").strip().lower()
+    if not tf:
+        return 15
+
+    try:
+        if tf.endswith("m"):
+            return int(tf[:-1])
+        if tf.endswith("h"):
+            return int(tf[:-1]) * 60
+        if tf.endswith("d"):
+            return int(tf[:-1]) * 1440
+    except Exception:
+        logger.warning("Failed to parse timeframe=%s, fallback to 15m", timeframe)
+
+    return 15
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        logger.warning("Could not parse datetime value=%s", value)
+        return None
+
+
+def _bars_since(start_iso: Optional[str], timeframe_minutes: int) -> int:
+    start_dt = _parse_iso_datetime(start_iso)
+    if not start_dt:
+        return 0
+
+    now_dt = datetime.now(timezone.utc)
+    seconds = max((now_dt - start_dt).total_seconds(), 0)
+    bar_seconds = max(timeframe_minutes * 60, 60)
+    return int(seconds // bar_seconds)
+
+
 class RibbonWorker:
     def __init__(self) -> None:
         self.scanner = BinanceFuturesScanner()
         self.notifier = TelegramNotifier()
         self.last_processed_candle_by_symbol: Dict[str, str] = {}
         self.last_markets_reload = 0.0
+        self.timeframe_minutes = _parse_timeframe_to_minutes(TIMEFRAME)
 
     def reload_symbols_if_needed(self) -> list[str]:
         now = time.time()
@@ -46,7 +107,7 @@ class RibbonWorker:
     def _close_trade(self, trade: dict, exit_price: float, result: str, close_reason: str) -> None:
         trade_id = int(trade["id"])
         entry = float(trade["entry_price"])
-        side = trade["side"]
+        side = str(trade["side"]).lower()
 
         if side == "long":
             pnl_pct = pct_change(exit_price, entry)
@@ -102,6 +163,7 @@ class RibbonWorker:
         logger.info("Checking %s open trades...", len(open_trades))
         for trade in open_trades:
             symbol = trade["symbol"]
+
             try:
                 df = self.scanner.fetch_closed_candle_df(symbol)
                 if df.empty or len(df) < 220:
@@ -114,7 +176,7 @@ class RibbonWorker:
                 ema200 = float(last["ema200"]) if "ema200" in last else None
 
                 entry = float(trade["entry_price"])
-                side = trade["side"]
+                side = str(trade["side"]).lower()
                 leverage = float(trade["leverage"])
 
                 if side == "long":
@@ -151,15 +213,28 @@ class RibbonWorker:
                 trade["max_adverse_pct"] = round(max_adverse, 4)
 
                 recovery_mode = bool(trade.get("recovery_mode") or False)
+                entry_bars_open = _bars_since(trade.get("entry_time"), self.timeframe_minutes)
+                recovery_bars_open = _bars_since(trade.get("recovery_mode_time"), self.timeframe_minutes)
 
+                # 1) Ana TP
                 if current_roi_pct >= TP_ROI_TARGET:
                     self._close_trade(trade, close_price, "tp", "tp_roi_hit")
                     continue
 
+                # 2) Recovery mode'a gir
                 if (not recovery_mode) and current_roi_pct <= RECOVERY_TRIGGER_ROI:
-                    update_trade(int(trade["id"]), {"recovery_mode": True})
+                    update_trade(
+                        int(trade["id"]),
+                        {
+                            "recovery_mode": True,
+                            "recovery_mode_time": now_iso,
+                        },
+                    )
                     trade["recovery_mode"] = True
+                    trade["recovery_mode_time"] = now_iso
                     recovery_mode = True
+                    recovery_bars_open = 0
+
                     logger.info(
                         "Trade %s %s entered recovery mode at roi=%.2f%%",
                         trade["id"],
@@ -167,10 +242,31 @@ class RibbonWorker:
                         current_roi_pct,
                     )
 
+                # 3) Recovery exit
                 if recovery_mode and current_roi_pct >= RECOVERY_EXIT_ROI:
                     self._close_trade(trade, close_price, "recovery", "recovery_exit")
                     continue
 
+                # 4) Early failure
+                # İlk 8 barda en az +0.6% avantaj görmediyse çık
+                if (not recovery_mode) and entry_bars_open >= EARLY_FAILURE_BARS:
+                    if max_favor < EARLY_FAILURE_MIN_FAVOR_PCT:
+                        self._close_trade(trade, close_price, "time_exit", "early_failure_exit")
+                        continue
+
+                # 5) Recovery timeout
+                # Recovery başladıktan 12 bar sonra hala toparlayamadıysa çık
+                if recovery_mode and recovery_bars_open >= RECOVERY_TIMEOUT_BARS:
+                    self._close_trade(trade, close_price, "recovery_timeout", "recovery_timeout_exit")
+                    continue
+
+                # 6) Max hold
+                # Recovery dışında trade çok yaşlandıysa çık
+                if (not recovery_mode) and entry_bars_open >= MAX_HOLD_BARS:
+                    self._close_trade(trade, close_price, "time_exit", "max_hold_exit")
+                    continue
+
+                # 7) Trend break
                 if ema200 is not None:
                     if side == "long" and close_price < ema200:
                         self._close_trade(trade, close_price, "trend_break", "ema200_break")
@@ -206,7 +302,7 @@ class RibbonWorker:
                     continue
 
                 tp_price = _calc_tp_price(signal.entry_price, signal.side)
-                sl_price = 0.0  # V2: hard SL yok
+                sl_price = 0.0
                 now_iso = datetime.now(timezone.utc).isoformat()
 
                 if DRY_RUN:
@@ -243,11 +339,13 @@ class RibbonWorker:
                     "max_favor_pct": 0.0,
                     "max_adverse_pct": 0.0,
                     "recovery_mode": False,
+                    "recovery_mode_time": None,
                     "current_price": round(signal.entry_price, 10),
                     "floating_pnl_pct": 0.0,
                     "floating_roi_pct": 0.0,
                     "last_price_time": now_iso,
                 }
+
                 trade_id = insert_trade(payload)
 
                 self.notifier.send_signal(trade_id, signal, tp_price, sl_price)
