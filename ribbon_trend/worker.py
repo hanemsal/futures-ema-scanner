@@ -54,17 +54,22 @@ class RibbonWorker:
             pnl_pct = pct_change(entry, exit_price)
 
         roi_pct = pnl_pct * float(trade["leverage"])
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         update_trade(
             trade_id,
             {
                 "status": "closed",
                 "exit_price": round(exit_price, 10),
-                "exit_time": datetime.now(timezone.utc).isoformat(),
+                "exit_time": now_iso,
                 "pnl_pct": round(pnl_pct, 4),
                 "roi_pct": round(roi_pct, 4),
                 "result": result,
                 "close_reason": close_reason,
+                "current_price": round(exit_price, 10),
+                "floating_pnl_pct": round(pnl_pct, 4),
+                "floating_roi_pct": round(roi_pct, 4),
+                "last_price_time": now_iso,
             },
         )
 
@@ -74,6 +79,10 @@ class RibbonWorker:
         trade["roi_pct"] = round(roi_pct, 4)
         trade["result"] = result
         trade["close_reason"] = close_reason
+        trade["current_price"] = round(exit_price, 10)
+        trade["floating_pnl_pct"] = round(pnl_pct, 4)
+        trade["floating_roi_pct"] = round(roi_pct, 4)
+        trade["last_price_time"] = now_iso
 
         self.notifier.send_exit(trade)
         logger.info(
@@ -120,23 +129,33 @@ class RibbonWorker:
                 current_roi_pct = current_pnl_pct * leverage
                 max_favor = max(float(trade.get("max_favor_pct") or 0.0), current_favor)
                 max_adverse = min(float(trade.get("max_adverse_pct") or 0.0), current_adverse)
+                now_iso = datetime.now(timezone.utc).isoformat()
 
                 update_trade(
                     int(trade["id"]),
                     {
+                        "current_price": round(close_price, 10),
+                        "floating_pnl_pct": round(current_pnl_pct, 4),
+                        "floating_roi_pct": round(current_roi_pct, 4),
+                        "last_price_time": now_iso,
                         "max_favor_pct": round(max_favor, 4),
                         "max_adverse_pct": round(max_adverse, 4),
                     },
                 )
 
+                trade["current_price"] = round(close_price, 10)
+                trade["floating_pnl_pct"] = round(current_pnl_pct, 4)
+                trade["floating_roi_pct"] = round(current_roi_pct, 4)
+                trade["last_price_time"] = now_iso
+                trade["max_favor_pct"] = round(max_favor, 4)
+                trade["max_adverse_pct"] = round(max_adverse, 4)
+
                 recovery_mode = bool(trade.get("recovery_mode") or False)
 
-                # 1) Normal TP
                 if current_roi_pct >= TP_ROI_TARGET:
                     self._close_trade(trade, close_price, "tp", "tp_roi_hit")
                     continue
 
-                # 2) Recovery trigger
                 if (not recovery_mode) and current_roi_pct <= RECOVERY_TRIGGER_ROI:
                     update_trade(int(trade["id"]), {"recovery_mode": True})
                     trade["recovery_mode"] = True
@@ -148,12 +167,10 @@ class RibbonWorker:
                         current_roi_pct,
                     )
 
-                # 3) Recovery exit
                 if recovery_mode and current_roi_pct >= RECOVERY_EXIT_ROI:
                     self._close_trade(trade, close_price, "recovery", "recovery_exit")
                     continue
 
-                # 4) Trend broken on EMA200 close
                 if ema200 is not None:
                     if side == "long" and close_price < ema200:
                         self._close_trade(trade, close_price, "trend_break", "ema200_break")
@@ -190,6 +207,7 @@ class RibbonWorker:
 
                 tp_price = _calc_tp_price(signal.entry_price, signal.side)
                 sl_price = 0.0  # V2: hard SL yok
+                now_iso = datetime.now(timezone.utc).isoformat()
 
                 if DRY_RUN:
                     logger.info(
@@ -211,7 +229,7 @@ class RibbonWorker:
                     "entry_price": round(signal.entry_price, 10),
                     "tp_price": round(tp_price, 10),
                     "sl_price": round(sl_price, 10),
-                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                    "entry_time": now_iso,
                     "signal_candle_time": signal.signal_candle_time,
                     "reason": signal.reason,
                     "extension_pct": signal.extension_pct,
@@ -225,6 +243,10 @@ class RibbonWorker:
                     "max_favor_pct": 0.0,
                     "max_adverse_pct": 0.0,
                     "recovery_mode": False,
+                    "current_price": round(signal.entry_price, 10),
+                    "floating_pnl_pct": 0.0,
+                    "floating_roi_pct": 0.0,
+                    "last_price_time": now_iso,
                 }
                 trade_id = insert_trade(payload)
 
