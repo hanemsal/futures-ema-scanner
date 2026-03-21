@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from flask import Flask, request
+from flask import Flask, Response, request
 
 from config import DASHBOARD_HOST, DASHBOARD_PORT, PUMP_DASHBOARD_URL, RIBBON_DASHBOARD_TITLE
 from db import fetch_open_trades, fetch_stats, fetch_trades, init_db
@@ -34,6 +36,48 @@ def _parse_dt(value):
         return None
 
 
+def _parse_date_input(value: str):
+    if not value:
+        return None
+
+    value = value.strip()
+
+    patterns = [
+        "%d-%m-%Y",
+        "%d.%m.%Y",
+        "%Y-%m-%d",
+    ]
+
+    for pattern in patterns:
+        try:
+            return datetime.strptime(value, pattern).date()
+        except Exception:
+            pass
+
+    return None
+
+
+def _dt_matches_date(dt_value, target_date) -> bool:
+    dt = _parse_dt(dt_value)
+    if not dt or not target_date:
+        return False
+    return dt.astimezone(ISTANBUL_TZ).date() == target_date
+
+
+def _dt_in_range(dt_value, start_date=None, end_date=None) -> bool:
+    dt = _parse_dt(dt_value)
+    if not dt:
+        return False
+
+    local_date = dt.astimezone(ISTANBUL_TZ).date()
+
+    if start_date and local_date < start_date:
+        return False
+    if end_date and local_date > end_date:
+        return False
+    return True
+
+
 def _to_istanbul_time(value) -> str:
     dt = _parse_dt(value)
     if not dt:
@@ -62,9 +106,7 @@ def _fmt_text(value) -> str:
 def _fmt_version(value) -> str:
     if value is None or str(value).strip() == "":
         return "-"
-    text = str(value).strip()
-    text = text.replace("ribbon_signal_", "")
-    return text
+    return str(value).strip().replace("ribbon_signal_", "")
 
 
 def _safe_float(value, default=0.0) -> float:
@@ -372,6 +414,128 @@ def _calc_open_trade_health(open_trades: list[dict]) -> dict:
     }
 
 
+def _apply_trade_filters(
+    trades: list[dict],
+    side: str,
+    status: str,
+    version: str,
+    entry_date,
+    start_date,
+    end_date,
+) -> list[dict]:
+    filtered = trades
+
+    if side != "all":
+        filtered = [t for t in filtered if str(t.get("side", "")).lower() == side]
+
+    if status != "all":
+        filtered = [t for t in filtered if str(t.get("status", "")).lower() == status]
+
+    if version != "all":
+        filtered = [t for t in filtered if _fmt_version(t.get("entry_note")) == version]
+
+    if entry_date:
+        filtered = [t for t in filtered if _dt_matches_date(t.get("entry_time"), entry_date)]
+
+    if start_date or end_date:
+        filtered = [t for t in filtered if _dt_in_range(t.get("entry_time"), start_date, end_date)]
+
+    return filtered
+
+
+def _calc_filtered_summary(trades: list[dict]) -> dict:
+    total = len(trades)
+    open_n = sum(1 for t in trades if t.get("status") == "open")
+    closed_n = sum(1 for t in trades if t.get("status") == "closed")
+    long_n = sum(1 for t in trades if t.get("side") == "long")
+    short_n = sum(1 for t in trades if t.get("side") == "short")
+
+    closed = [t for t in trades if t.get("status") == "closed"]
+    winners = sum(1 for t in closed if _safe_float(t.get("roi_pct")) > 0)
+    total_roi = sum(_safe_float(t.get("roi_pct")) for t in closed)
+    avg_roi = round(total_roi / len(closed), 2) if closed else 0.0
+    win_rate = round((winners / len(closed)) * 100.0, 2) if closed else 0.0
+
+    avg_trade_time = _calc_avg_trade_time_minutes(closed)
+
+    return {
+        "total": total,
+        "open": open_n,
+        "closed": closed_n,
+        "long": long_n,
+        "short": short_n,
+        "win_rate": win_rate,
+        "avg_roi": avg_roi,
+        "avg_trade_time": avg_trade_time,
+    }
+
+
+def _build_csv_response(trades: list[dict]) -> Response:
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "id",
+        "symbol",
+        "side",
+        "status",
+        "version",
+        "recovery_mode",
+        "entry_price",
+        "tp_price",
+        "sl_price",
+        "current_price",
+        "exit_price",
+        "floating_pnl_pct",
+        "floating_roi_pct",
+        "pnl_pct",
+        "roi_pct",
+        "entry_time",
+        "last_price_time",
+        "exit_time",
+        "close_reason",
+        "entry_note",
+        "extension_pct",
+        "ema200_slope_pct",
+    ])
+
+    for t in trades:
+        writer.writerow([
+            t.get("id"),
+            t.get("symbol"),
+            t.get("side"),
+            t.get("status"),
+            _fmt_version(t.get("entry_note")),
+            bool(t.get("recovery_mode")),
+            t.get("entry_price"),
+            t.get("tp_price"),
+            t.get("sl_price"),
+            t.get("current_price"),
+            t.get("exit_price"),
+            t.get("floating_pnl_pct"),
+            t.get("floating_roi_pct"),
+            t.get("pnl_pct"),
+            t.get("roi_pct"),
+            t.get("entry_time"),
+            t.get("last_price_time"),
+            t.get("exit_time"),
+            t.get("close_reason"),
+            t.get("entry_note"),
+            t.get("extension_pct"),
+            t.get("ema200_slope_pct"),
+        ])
+
+    csv_data = output.getvalue()
+    output.close()
+
+    filename = f"ribbon_trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @app.route("/")
 def home():
     return f"""
@@ -425,25 +589,59 @@ def home():
     """
 
 
+@app.route("/ribbon/export.csv")
+def ribbon_export_csv():
+    init_db()
+
+    side = request.args.get("side", "all").lower()
+    status = request.args.get("status", "all").lower()
+    version = request.args.get("version", "all")
+    entry_date = _parse_date_input(request.args.get("entry_date", ""))
+    start_date = _parse_date_input(request.args.get("start_date", ""))
+    end_date = _parse_date_input(request.args.get("end_date", ""))
+
+    all_trades = fetch_trades(limit=5000)
+    filtered = _apply_trade_filters(
+        all_trades,
+        side=side,
+        status=status,
+        version=version,
+        entry_date=entry_date,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return _build_csv_response(filtered)
+
+
 @app.route("/ribbon")
 def ribbon():
     init_db()
 
-    side = request.args.get("side", "all")
-    status = request.args.get("status", "all")
+    side = request.args.get("side", "all").lower()
+    status = request.args.get("status", "all").lower()
+    version = request.args.get("version", "all")
+    entry_date = _parse_date_input(request.args.get("entry_date", ""))
+    start_date = _parse_date_input(request.args.get("start_date", ""))
+    end_date = _parse_date_input(request.args.get("end_date", ""))
 
     stats = fetch_stats()
-    trades = fetch_trades(limit=500)
+    all_trades = fetch_trades(limit=5000)
     open_trades = fetch_open_trades()
 
-    if side != "all":
-        trades = [t for t in trades if t["side"] == side]
+    trades = _apply_trade_filters(
+        all_trades,
+        side=side,
+        status=status,
+        version=version,
+        entry_date=entry_date,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
-    if status != "all":
-        trades = [t for t in trades if t["status"] == status]
-
-    all_trades = fetch_trades(limit=500)
     closed_trades_for_stats = [t for t in reversed(all_trades) if t.get("status") == "closed"]
+    filtered_summary = _calc_filtered_summary(trades)
+    filtered_open_trades = [t for t in trades if t.get("status") == "open"]
+    filtered_closed_trades = [t for t in trades if t.get("status") == "closed"]
 
     closed_long_count = sum(1 for t in all_trades if t.get("status") == "closed" and t.get("side") == "long")
     closed_short_count = sum(1 for t in all_trades if t.get("status") == "closed" and t.get("side") == "short")
@@ -459,6 +657,37 @@ def ribbon():
     worst_open_roi_symbol = _fmt_text(open_health["worst_open_roi_trade"].get("symbol")) if open_health["worst_open_roi_trade"] else "-"
     best_favor_symbol = _fmt_text(open_health["best_favor_trade"].get("symbol")) if open_health["best_favor_trade"] else "-"
     worst_adverse_symbol = _fmt_text(open_health["worst_adverse_trade"].get("symbol")) if open_health["worst_adverse_trade"] else "-"
+
+    available_versions = sorted({
+        _fmt_version(t.get("entry_note"))
+        for t in all_trades
+        if _fmt_version(t.get("entry_note")) != "-"
+    })
+
+    still_open_from_filter = 0
+    if entry_date:
+        still_open_from_filter = sum(
+            1
+            for t in all_trades
+            if t.get("status") == "open" and _dt_matches_date(t.get("entry_time"), entry_date)
+        )
+
+    export_query = []
+    if side != "all":
+        export_query.append(f"side={side}")
+    if status != "all":
+        export_query.append(f"status={status}")
+    if version != "all":
+        export_query.append(f"version={version}")
+    if entry_date:
+        export_query.append(f"entry_date={entry_date.strftime('%d-%m-%Y')}")
+    if start_date:
+        export_query.append(f"start_date={start_date.strftime('%d-%m-%Y')}")
+    if end_date:
+        export_query.append(f"end_date={end_date.strftime('%d-%m-%Y')}")
+    export_href = "/ribbon/export.csv"
+    if export_query:
+        export_href += "?" + "&".join(export_query)
 
     rows = ""
     for t in trades:
@@ -476,7 +705,6 @@ def ribbon():
         status_badge = "#2563eb" if t["status"] == "open" else "#6b7280"
         recovery_badge = "#f59e0b" if bool(t.get("recovery_mode")) else "#374151"
         row_bg = "#0b1324" if t["status"] == "open" else "transparent"
-
         version_text = _fmt_version(t.get("entry_note"))
 
         rows += f"""
@@ -502,6 +730,18 @@ def ribbon():
             <td>{_fmt_text(t.get('close_reason'))}</td>
         </tr>
         """
+
+    entry_date_text = entry_date.strftime("%d.%m.%Y") if entry_date else "-"
+    start_date_text = start_date.strftime("%d.%m.%Y") if start_date else "-"
+    end_date_text = end_date.strftime("%d.%m.%Y") if end_date else "-"
+
+    def _quick_link(link_side, link_status, label):
+        return f"/ribbon?side={link_side}&status={link_status}&version={version}"
+
+    version_options = '<option value="all">all</option>'
+    for v in available_versions:
+        selected = "selected" if v == version else ""
+        version_options += f'<option value="{v}" {selected}>{v}</option>'
 
     return f"""
     <html>
@@ -555,12 +795,62 @@ def ribbon():
             }}
             .filters {{
                 margin:14px 0 18px 0;
+                display:flex;
+                flex-wrap:wrap;
+                gap:10px;
+                align-items:center;
             }}
             .filters a {{
                 color:#8ab4ff;
-                margin-right:10px;
                 text-decoration:none;
                 font-weight:600;
+            }}
+            .chip {{
+                display:inline-block;
+                padding:8px 12px;
+                background:#111827;
+                border:1px solid #1f2937;
+                border-radius:10px;
+            }}
+            .toolbar {{
+                display:flex;
+                flex-wrap:wrap;
+                gap:12px;
+                margin:14px 0 18px 0;
+                align-items:end;
+            }}
+            .toolbar .group {{
+                background:#111827;
+                border:1px solid #1f2937;
+                border-radius:12px;
+                padding:12px;
+            }}
+            .toolbar label {{
+                display:block;
+                font-size:12px;
+                color:#9ca3af;
+                margin-bottom:6px;
+            }}
+            .toolbar input, .toolbar select {{
+                background:#0f172a;
+                color:white;
+                border:1px solid #334155;
+                border-radius:8px;
+                padding:8px 10px;
+                min-width:140px;
+            }}
+            .toolbar button, .toolbar .btn {{
+                background:#2563eb;
+                color:white;
+                border:none;
+                border-radius:10px;
+                padding:10px 14px;
+                text-decoration:none;
+                cursor:pointer;
+                display:inline-block;
+            }}
+            .toolbar .btn.secondary {{
+                background:#059669;
             }}
             table {{
                 width:100%;
@@ -628,6 +918,64 @@ def ribbon():
     <h1>{RIBBON_DASHBOARD_TITLE}</h1>
     <div class="sub">15m Binance Futures Ribbon Trend test paneli. Saatler İstanbul zamanıdır. Sayfa 30 saniyede bir yenilenir.</div>
 
+    <div class="toolbar">
+        <form method="get" action="/ribbon" class="group">
+            <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:end;">
+                <div>
+                    <label>Side</label>
+                    <select name="side">
+                        <option value="all" {"selected" if side == "all" else ""}>all</option>
+                        <option value="long" {"selected" if side == "long" else ""}>long</option>
+                        <option value="short" {"selected" if side == "short" else ""}>short</option>
+                    </select>
+                </div>
+                <div>
+                    <label>Status</label>
+                    <select name="status">
+                        <option value="all" {"selected" if status == "all" else ""}>all</option>
+                        <option value="open" {"selected" if status == "open" else ""}>open</option>
+                        <option value="closed" {"selected" if status == "closed" else ""}>closed</option>
+                    </select>
+                </div>
+                <div>
+                    <label>Version</label>
+                    <select name="version">
+                        {version_options}
+                    </select>
+                </div>
+                <div>
+                    <label>Entry Date</label>
+                    <input type="text" name="entry_date" value="{request.args.get('entry_date', '')}" placeholder="20-03-2026">
+                </div>
+                <div>
+                    <label>Start Date</label>
+                    <input type="text" name="start_date" value="{request.args.get('start_date', '')}" placeholder="20-03-2026">
+                </div>
+                <div>
+                    <label>End Date</label>
+                    <input type="text" name="end_date" value="{request.args.get('end_date', '')}" placeholder="21-03-2026">
+                </div>
+                <div>
+                    <button type="submit">Apply Filters</button>
+                </div>
+                <div>
+                    <a class="btn secondary" href="{export_href}">CSV İndir</a>
+                </div>
+                <div>
+                    <a class="btn" href="/ribbon">Temizle</a>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <div class="filters">
+        <a class="chip" href="/ribbon?side=all&status=all&version={version}">All</a>
+        <a class="chip" href="{_quick_link('long', 'open', 'Long Open')}">Long Open</a>
+        <a class="chip" href="{_quick_link('long', 'closed', 'Long Closed')}">Long Closed</a>
+        <a class="chip" href="{_quick_link('short', 'open', 'Short Open')}">Short Open</a>
+        <a class="chip" href="{_quick_link('short', 'closed', 'Short Closed')}">Short Closed</a>
+    </div>
+
     <div class="section">
         <div class="section-title">Closed Trade Summary</div>
         <div class="cards">
@@ -649,6 +997,26 @@ def ribbon():
             <div class="card"><div class="label">Max Winning Streak</div><div class="value">{max_win_streak}</div></div>
             <div class="card"><div class="label">Max Losing Streak</div><div class="value">{max_losing_streak}</div></div>
             <div class="card"><div class="label">Avg Trade Time</div><div class="value">{avg_trade_time_min} min</div></div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Filtered View Summary</div>
+        <div class="cards">
+            <div class="card"><div class="label">Filtered Trades</div><div class="value">{filtered_summary["total"]}</div></div>
+            <div class="card"><div class="label">Filtered Open</div><div class="value">{filtered_summary["open"]}</div></div>
+            <div class="card"><div class="label">Filtered Closed</div><div class="value">{filtered_summary["closed"]}</div></div>
+            <div class="card"><div class="label">Filtered Win Rate</div><div class="value">{filtered_summary["win_rate"]}%</div></div>
+
+            <div class="card"><div class="label">Filtered Long</div><div class="value">{filtered_summary["long"]}</div></div>
+            <div class="card"><div class="label">Filtered Short</div><div class="value">{filtered_summary["short"]}</div></div>
+            <div class="card"><div class="label">Filtered Avg ROI</div><div class="value">{filtered_summary["avg_roi"]}%</div></div>
+            <div class="card"><div class="label">Filtered Avg Trade Time</div><div class="value">{filtered_summary["avg_trade_time"]} min</div></div>
+
+            <div class="card"><div class="label">Entry Date Filter</div><div class="value">{entry_date_text}</div></div>
+            <div class="card"><div class="label">Start Date</div><div class="value">{start_date_text}</div></div>
+            <div class="card"><div class="label">End Date</div><div class="value">{end_date_text}</div></div>
+            <div class="card"><div class="label">Still Open From Entry Date</div><div class="value">{still_open_from_filter}</div></div>
         </div>
     </div>
 
@@ -694,14 +1062,6 @@ def ribbon():
 
     <div class="chart-card">
         {equity_curve_svg}
-    </div>
-
-    <div class="filters">
-        <a href="/ribbon?side=all&status=all">All</a>
-        <a href="/ribbon?side=long&status=all">Long</a>
-        <a href="/ribbon?side=short&status=all">Short</a>
-        <a href="/ribbon?side=all&status=open">Open</a>
-        <a href="/ribbon?side=all&status=closed">Closed</a>
     </div>
 
     <div class="table-wrap">
