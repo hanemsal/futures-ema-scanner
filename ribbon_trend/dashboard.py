@@ -59,6 +59,14 @@ def _fmt_text(value) -> str:
     return str(value)
 
 
+def _fmt_version(value) -> str:
+    if value is None or str(value).strip() == "":
+        return "-"
+    text = str(value).strip()
+    text = text.replace("ribbon_signal_", "")
+    return text
+
+
 def _safe_float(value, default=0.0) -> float:
     try:
         if value is None:
@@ -469,12 +477,15 @@ def ribbon():
         recovery_badge = "#f59e0b" if bool(t.get("recovery_mode")) else "#374151"
         row_bg = "#0b1324" if t["status"] == "open" else "transparent"
 
+        version_text = _fmt_version(t.get("entry_note"))
+
         rows += f"""
         <tr style="background:{row_bg}">
             <td>{t['id']}</td>
             <td>{t['symbol']}</td>
             <td><span class="badge" style="background:{side_badge}">{t['side'].upper()}</span></td>
             <td><span class="badge" style="background:{status_badge}">{t['status'].upper()}</span></td>
+            <td>{version_text}</td>
             <td><span class="badge" style="background:{recovery_badge}">{'RECOVERY' if bool(t.get('recovery_mode')) else 'NORMAL'}</span></td>
             <td>{_fmt_price(t.get('entry_price'))}</td>
             <td>{_fmt_price(t.get('tp_price'))}</td>
@@ -700,6 +711,7 @@ def ribbon():
                 <th>Coin</th>
                 <th>Side</th>
                 <th>Status</th>
+                <th>Version</th>
                 <th>Mode</th>
                 <th>Entry</th>
                 <th>TP</th>
