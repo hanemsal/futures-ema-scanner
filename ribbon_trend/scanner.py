@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import List, Tuple
+from typing import List
 
 import ccxt
 import pandas as pd
@@ -53,7 +53,6 @@ class BinanceFuturesScanner:
             if ONLY_PERPETUAL and not market.get("swap", False):
                 continue
             if ":" in symbol:
-                # ccxt unified futures symbols often look like BTC/USDT:USDT
                 pass
             symbols.append(symbol)
 
@@ -62,13 +61,23 @@ class BinanceFuturesScanner:
         logger.info("Loaded %s futures symbols.", len(self._symbols_cache))
         return self._symbols_cache
 
-    def fetch_ohlcv_df(self, symbol: str, limit: int = OHLCV_LIMIT) -> pd.DataFrame:
-        raw = self.exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=limit)
+    def fetch_ohlcv_df(
+        self,
+        symbol: str,
+        timeframe: str | None = None,
+        limit: int = OHLCV_LIMIT,
+    ) -> pd.DataFrame:
+        tf = timeframe or TIMEFRAME
+        raw = self.exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
         time.sleep(SYMBOL_PAUSE_SECONDS)
+
         if not raw:
             return pd.DataFrame()
 
-        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(
+            raw,
+            columns=["timestamp", "open", "high", "low", "close", "volume"],
+        )
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         return df
 
@@ -77,11 +86,16 @@ class BinanceFuturesScanner:
         time.sleep(SYMBOL_PAUSE_SECONDS)
         return ticker
 
-    def fetch_closed_candle_df(self, symbol: str) -> pd.DataFrame:
-        df = self.fetch_ohlcv_df(symbol)
+    def fetch_closed_candle_df(
+        self,
+        symbol: str,
+        timeframe: str | None = None,
+        limit: int = OHLCV_LIMIT,
+    ) -> pd.DataFrame:
+        df = self.fetch_ohlcv_df(symbol, timeframe=timeframe, limit=limit)
         if df.empty or len(df) < 3:
             return df
-        # Drop the currently forming candle.
+
         return df.iloc[:-1].copy().reset_index(drop=True)
 
     def current_utc(self) -> datetime:
