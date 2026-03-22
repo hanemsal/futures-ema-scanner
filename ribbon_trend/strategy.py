@@ -20,7 +20,6 @@ from config import (
     MIN_NOTIONAL_24H_USDT,
     MIN_RIBBON_EXPANSION_PCT,
 )
-
 from utils import ema, pct_change
 
 
@@ -29,8 +28,8 @@ EMA20_TREND_LOOKBACK = 2
 EMA50_TREND_LOOKBACK = 3
 MIN_CLOSE_DISTANCE_FROM_EMA200_PCT = 0.15
 
-# HTF trend timeframe
-HTF_TIMEFRAME = "1h"
+# HTF
+HTF_MIN_CLOSE_DISTANCE_FROM_EMA200_PCT = 0.10
 
 
 @dataclass
@@ -50,7 +49,6 @@ class SignalResult:
 
 
 def _prepare(df: pd.DataFrame) -> pd.DataFrame:
-
     df = df.copy()
 
     df["ema20"] = ema(df["close"], EMA_FAST)
@@ -60,25 +58,24 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
 
     body = (df["close"] - df["open"]).abs()
 
-    df["body_pct"] = (body / df["open"].replace(0, pd.NA)) * 100
+    df["body_pct"] = (body / df["open"].replace(0, pd.NA)) * 100.0
 
     df["extension_pct"] = (
         (df["close"] - df["ema20"]) / df["ema20"].replace(0, pd.NA)
-    ) * 100
+    ) * 100.0
 
     df["ribbon_expansion_pct"] = (
         (df["ema20"] - df["ema50"]).abs() / df["close"].replace(0, pd.NA)
-    ) * 100
+    ) * 100.0
 
     df["close_vs_ema200_pct"] = (
         (df["close"] - df["ema200"]) / df["ema200"].replace(0, pd.NA)
-    ) * 100
+    ) * 100.0
 
     return df
 
 
 def _ema_slope_pct(series: pd.Series, lookback: int) -> float:
-
     if len(series) <= lookback:
         return 0.0
 
@@ -92,37 +89,91 @@ def _ema_slope_pct(series: pd.Series, lookback: int) -> float:
 
 
 def _is_monotonic_up(series: pd.Series, bars: int) -> bool:
-
     if len(series) < bars + 1:
         return False
 
     recent = series.iloc[-(bars + 1):].tolist()
-
     return all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
 
 
 def _is_monotonic_down(series: pd.Series, bars: int) -> bool:
-
     if len(series) < bars + 1:
         return False
 
     recent = series.iloc[-(bars + 1):].tolist()
-
     return all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
 
 
 def _passes_common_filters(df: pd.DataFrame, ticker: dict) -> bool:
-
     if len(df) < 220:
         return False
 
-    notional = float(ticker.get("quoteVolume") or 0)
-
+    notional = float(ticker.get("quoteVolume") or 0.0)
     return notional >= MIN_NOTIONAL_24H_USDT
 
 
-def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[SignalResult]:
+def _htf_long_ok(htf_df: pd.DataFrame) -> bool:
+    if htf_df.empty or len(htf_df) < 220:
+        return False
 
+    htf = _prepare(htf_df)
+    last = htf.iloc[-1]
+
+    close_price = float(last["close"])
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
+    ema100 = float(last["ema100"])
+    ema200 = float(last["ema200"])
+    close_vs_ema200_pct = float(last["close_vs_ema200_pct"])
+
+    slope_pct = _ema_slope_pct(htf["ema200"], EMA200_SLOPE_LOOKBACK)
+    ema200_up_confirmed = _is_monotonic_up(htf["ema200"], EMA_SLOPE_CONFIRM_BARS)
+
+    return all(
+        [
+            close_price > ema200,
+            close_vs_ema200_pct >= HTF_MIN_CLOSE_DISTANCE_FROM_EMA200_PCT,
+            slope_pct >= MIN_EMA200_SLOPE_PCT,
+            ema200_up_confirmed,
+            ema20 > ema50 > ema100 > ema200,
+        ]
+    )
+
+
+def _htf_short_ok(htf_df: pd.DataFrame) -> bool:
+    if htf_df.empty or len(htf_df) < 220:
+        return False
+
+    htf = _prepare(htf_df)
+    last = htf.iloc[-1]
+
+    close_price = float(last["close"])
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
+    ema100 = float(last["ema100"])
+    ema200 = float(last["ema200"])
+    close_vs_ema200_pct = float(last["close_vs_ema200_pct"])
+
+    slope_pct = _ema_slope_pct(htf["ema200"], EMA200_SLOPE_LOOKBACK)
+    ema200_down_confirmed = _is_monotonic_down(htf["ema200"], EMA_SLOPE_CONFIRM_BARS)
+
+    return all(
+        [
+            close_price < ema200,
+            close_vs_ema200_pct <= -HTF_MIN_CLOSE_DISTANCE_FROM_EMA200_PCT,
+            slope_pct <= -MIN_EMA200_SLOPE_PCT,
+            ema200_down_confirmed,
+            ema20 < ema50 < ema100 < ema200,
+        ]
+    )
+
+
+def evaluate_signal(
+    symbol: str,
+    df: pd.DataFrame,
+    htf_df: pd.DataFrame,
+    ticker: dict,
+) -> Optional[SignalResult]:
     if df.empty:
         return None
 
@@ -131,11 +182,13 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
     if not _passes_common_filters(df, ticker):
         return None
 
+    if htf_df.empty or len(htf_df) < 220:
+        return None
+
     last = df.iloc[-1]
 
     close_price = float(last["close"])
     open_price = float(last["open"])
-
     ema20 = float(last["ema20"])
     ema50 = float(last["ema50"])
     ema100 = float(last["ema100"])
@@ -145,11 +198,9 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
     body_pct = float(last["body_pct"])
     ribbon_expansion_pct = float(last["ribbon_expansion_pct"])
     close_vs_ema200_pct = float(last["close_vs_ema200_pct"])
-
     signal_time = str(last["datetime"])
 
     slope_pct = _ema_slope_pct(df["ema200"], EMA200_SLOPE_LOOKBACK)
-
     ema20_slope_pct = _ema_slope_pct(df["ema20"], EMA20_TREND_LOOKBACK)
     ema50_slope_pct = _ema_slope_pct(df["ema50"], EMA50_TREND_LOOKBACK)
 
@@ -158,14 +209,11 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
 
     ema20_up = ema20_slope_pct > 0
     ema20_down = ema20_slope_pct < 0
-
     ema50_up = ema50_slope_pct > 0
     ema50_down = ema50_slope_pct < 0
 
     green = close_price > open_price
     red = close_price < open_price
-
-    # ----- LONG -----
 
     long_ok = all(
         [
@@ -182,17 +230,22 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
             body_pct >= MIN_CANDLE_BODY_PCT,
             extension_pct >= MIN_EXTENSION_PCT,
             extension_pct <= MAX_EXTENSION_PCT,
+            _htf_long_ok(htf_df),
         ]
     )
 
     if long_ok:
-
         return SignalResult(
             side="long",
             symbol=symbol,
             entry_price=close_price,
             signal_candle_time=signal_time,
-            reason="ribbon_long_v4_htf",
+            reason=(
+                "15m_long + 1h_trend_align, "
+                "close>ema200_buffer, ema200_up_confirmed, "
+                "ema20_up, ema50_up, ema20>ema50>ema100>ema200, "
+                "ribbon_expanded, green_candle, extension_in_range"
+            ),
             extension_pct=round(extension_pct, 4),
             candle_body_pct=round(body_pct, 4),
             ema20=ema20,
@@ -201,8 +254,6 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
             ema200=ema200,
             ema200_slope_pct=round(slope_pct, 5),
         )
-
-    # ----- SHORT -----
 
     short_ok = all(
         [
@@ -219,17 +270,22 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
             body_pct >= MIN_CANDLE_BODY_PCT,
             extension_pct <= -MIN_EXTENSION_PCT,
             abs(extension_pct) <= MAX_EXTENSION_PCT,
+            _htf_short_ok(htf_df),
         ]
     )
 
     if short_ok:
-
         return SignalResult(
             side="short",
             symbol=symbol,
             entry_price=close_price,
             signal_candle_time=signal_time,
-            reason="ribbon_short_v4_htf",
+            reason=(
+                "15m_short + 1h_trend_align, "
+                "close<ema200_buffer, ema200_down_confirmed, "
+                "ema20_down, ema50_down, ema20<ema50<ema100<ema200, "
+                "ribbon_expanded, red_candle, extension_in_range"
+            ),
             extension_pct=round(extension_pct, 4),
             candle_body_pct=round(body_pct, 4),
             ema20=ema20,
