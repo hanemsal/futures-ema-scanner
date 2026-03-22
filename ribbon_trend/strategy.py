@@ -23,6 +23,13 @@ from config import (
 from utils import ema, pct_change
 
 
+# Ek teyit ayarları
+EMA_SLOPE_CONFIRM_BARS = 3
+EMA20_TREND_LOOKBACK = 2
+EMA50_TREND_LOOKBACK = 3
+MIN_CLOSE_DISTANCE_FROM_EMA200_PCT = 0.15
+
+
 @dataclass
 class SignalResult:
     side: str
@@ -49,23 +56,52 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
     body = (df["close"] - df["open"]).abs()
     df["body_pct"] = (body / df["open"].replace(0, pd.NA)) * 100.0
 
-    df["extension_pct"] = ((df["close"] - df["ema20"]) / df["ema20"].replace(0, pd.NA)) * 100.0
+    df["extension_pct"] = (
+        (df["close"] - df["ema20"]) / df["ema20"].replace(0, pd.NA)
+    ) * 100.0
 
-    # Ribbon expansion:
-    # abs(ema20 - ema50) / close * 100
     df["ribbon_expansion_pct"] = (
         (df["ema20"] - df["ema50"]).abs() / df["close"].replace(0, pd.NA)
+    ) * 100.0
+
+    df["close_vs_ema200_pct"] = (
+        (df["close"] - df["ema200"]) / df["ema200"].replace(0, pd.NA)
     ) * 100.0
 
     return df
 
 
-def _ema200_slope_pct(df: pd.DataFrame) -> float:
-    if len(df) <= EMA200_SLOPE_LOOKBACK:
+def _ema_slope_pct(series: pd.Series, lookback: int) -> float:
+    if len(series) <= lookback:
         return 0.0
-    now = float(df.iloc[-1]["ema200"])
-    before = float(df.iloc[-1 - EMA200_SLOPE_LOOKBACK]["ema200"])
+
+    now = float(series.iloc[-1])
+    before = float(series.iloc[-1 - lookback])
+
+    if before == 0:
+        return 0.0
+
     return pct_change(now, before)
+
+
+def _ema200_slope_pct(df: pd.DataFrame) -> float:
+    return _ema_slope_pct(df["ema200"], EMA200_SLOPE_LOOKBACK)
+
+
+def _is_monotonic_up(series: pd.Series, bars: int) -> bool:
+    if len(series) < bars + 1:
+        return False
+
+    recent = series.iloc[-(bars + 1):].tolist()
+    return all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
+
+
+def _is_monotonic_down(series: pd.Series, bars: int) -> bool:
+    if len(series) < bars + 1:
+        return False
+
+    recent = series.iloc[-(bars + 1):].tolist()
+    return all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
 
 
 def _passes_common_filters(df: pd.DataFrame, ticker: dict) -> bool:
@@ -86,7 +122,6 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
         return None
 
     last = df.iloc[-1]
-    slope_pct = _ema200_slope_pct(df)
 
     close_price = float(last["close"])
     open_price = float(last["open"])
@@ -98,23 +133,33 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
     extension_pct = float(last["extension_pct"])
     body_pct = float(last["body_pct"])
     ribbon_expansion_pct = float(last["ribbon_expansion_pct"])
+    close_vs_ema200_pct = float(last["close_vs_ema200_pct"])
     signal_time = str(last["datetime"])
+
+    slope_pct = _ema200_slope_pct(df)
+    ema20_slope_pct = _ema_slope_pct(df["ema20"], EMA20_TREND_LOOKBACK)
+    ema50_slope_pct = _ema_slope_pct(df["ema50"], EMA50_TREND_LOOKBACK)
+
+    ema200_up_confirmed = _is_monotonic_up(df["ema200"], EMA_SLOPE_CONFIRM_BARS)
+    ema200_down_confirmed = _is_monotonic_down(df["ema200"], EMA_SLOPE_CONFIRM_BARS)
+
+    ema20_up = ema20_slope_pct > 0
+    ema20_down = ema20_slope_pct < 0
+    ema50_up = ema50_slope_pct > 0
+    ema50_down = ema50_slope_pct < 0
 
     green = close_price > open_price
     red = close_price < open_price
 
-    # LONG:
-    # - trend yukarı
-    # - ema200 slope yeterince güçlü
-    # - ribbon sıralı
-    # - ribbon yeterince açık
-    # - candle body yeterli
-    # - extension hem minimum hem maksimum sınırda
     long_ok = all(
         [
             ALLOW_LONGS,
             close_price > ema200,
+            close_vs_ema200_pct >= MIN_CLOSE_DISTANCE_FROM_EMA200_PCT,
             slope_pct >= MIN_EMA200_SLOPE_PCT,
+            ema200_up_confirmed,
+            ema20_up,
+            ema50_up,
             ema20 > ema50 > ema100 > ema200,
             ribbon_expansion_pct >= MIN_RIBBON_EXPANSION_PCT,
             green,
@@ -131,10 +176,10 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
             entry_price=close_price,
             signal_candle_time=signal_time,
             reason=(
-                "close>ema200, ema200_up_strong, "
+                "close>ema200_buffer, ema200_up_strong_confirmed, "
+                "ema20_up, ema50_up, "
                 "ema20>ema50>ema100>ema200, "
-                "ribbon_expanded, green_candle, "
-                "extension_in_range"
+                "ribbon_expanded, green_candle, extension_in_range"
             ),
             extension_pct=round(extension_pct, 4),
             candle_body_pct=round(body_pct, 4),
@@ -145,18 +190,15 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
             ema200_slope_pct=round(slope_pct, 5),
         )
 
-    # SHORT:
-    # - trend aşağı
-    # - ema200 slope yeterince güçlü
-    # - ribbon sıralı
-    # - ribbon yeterince açık
-    # - candle body yeterli
-    # - extension hem minimum hem maksimum sınırda
     short_ok = all(
         [
             ALLOW_SHORTS,
             close_price < ema200,
+            close_vs_ema200_pct <= -MIN_CLOSE_DISTANCE_FROM_EMA200_PCT,
             slope_pct <= -MIN_EMA200_SLOPE_PCT,
+            ema200_down_confirmed,
+            ema20_down,
+            ema50_down,
             ema20 < ema50 < ema100 < ema200,
             ribbon_expansion_pct >= MIN_RIBBON_EXPANSION_PCT,
             red,
@@ -173,10 +215,10 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, ticker: dict) -> Optional[Sig
             entry_price=close_price,
             signal_candle_time=signal_time,
             reason=(
-                "close<ema200, ema200_down_strong, "
+                "close<ema200_buffer, ema200_down_strong_confirmed, "
+                "ema20_down, ema50_down, "
                 "ema20<ema50<ema100<ema200, "
-                "ribbon_expanded, red_candle, "
-                "extension_in_range"
+                "ribbon_expanded, red_candle, extension_in_range"
             ),
             extension_pct=round(extension_pct, 4),
             candle_body_pct=round(body_pct, 4),
