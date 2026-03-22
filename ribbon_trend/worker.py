@@ -21,19 +21,18 @@ from utils import pct_change, setup_logger
 
 logger = setup_logger("ribbon.worker")
 
-# Ana TP
 TP_ROI_TARGET = 10.0
 
-# Recovery
 RECOVERY_TRIGGER_ROI = -12.0
 RECOVERY_EXIT_ROI = 2.0
 
-# Zaman bazlı exitler
 EARLY_FAILURE_BARS = 8
 EARLY_FAILURE_MIN_FAVOR_PCT = 0.6
 
 MAX_HOLD_BARS = 24
 RECOVERY_TIMEOUT_BARS = 12
+
+HTF_TIMEFRAME = "1h"
 
 
 def _calc_tp_price(entry_price: float, side: str) -> float:
@@ -104,6 +103,47 @@ class RibbonWorker:
             self.last_markets_reload = now
         return symbols
 
+    def _fetch_df(self, symbol: str, timeframe: str):
+        """
+        Scanner farklı imzalar kullanıyorsa olabildiğince uyumlu dene.
+        """
+        try:
+            return self.scanner.fetch_closed_candle_df(symbol, timeframe=timeframe)
+        except TypeError:
+            pass
+        except Exception as exc:
+            logger.warning("fetch_closed_candle_df(symbol, timeframe=%s) failed for %s: %s", timeframe, symbol, exc)
+
+        try:
+            return self.scanner.fetch_closed_candle_df(symbol, tf=timeframe)
+        except TypeError:
+            pass
+        except Exception as exc:
+            logger.warning("fetch_closed_candle_df(symbol, tf=%s) failed for %s: %s", timeframe, symbol, exc)
+
+        # Son çare: mevcut timeframe için eski çağrı
+        if timeframe == TIMEFRAME:
+            try:
+                return self.scanner.fetch_closed_candle_df(symbol)
+            except Exception as exc:
+                logger.warning("fetch_closed_candle_df(symbol) failed for %s: %s", symbol, exc)
+
+        # Alternatif method isimleri için dene
+        for method_name in ("fetch_candle_df", "fetch_ohlcv_df", "fetch_df"):
+            method = getattr(self.scanner, method_name, None)
+            if callable(method):
+                try:
+                    return method(symbol, timeframe=timeframe)
+                except TypeError:
+                    try:
+                        return method(symbol, tf=timeframe)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        return None
+
     def _close_trade(self, trade: dict, exit_price: float, result: str, close_reason: str) -> None:
         trade_id = int(trade["id"])
         entry = float(trade["entry_price"])
@@ -165,8 +205,8 @@ class RibbonWorker:
             symbol = trade["symbol"]
 
             try:
-                df = self.scanner.fetch_closed_candle_df(symbol)
-                if df.empty or len(df) < 220:
+                df = self._fetch_df(symbol, TIMEFRAME)
+                if df is None or df.empty or len(df) < 220:
                     continue
 
                 last = df.iloc[-1]
@@ -216,12 +256,10 @@ class RibbonWorker:
                 entry_bars_open = _bars_since(trade.get("entry_time"), self.timeframe_minutes)
                 recovery_bars_open = _bars_since(trade.get("recovery_mode_time"), self.timeframe_minutes)
 
-                # 1) Ana TP
                 if current_roi_pct >= TP_ROI_TARGET:
                     self._close_trade(trade, close_price, "tp", "tp_roi_hit")
                     continue
 
-                # 2) Recovery mode'a gir
                 if (not recovery_mode) and current_roi_pct <= RECOVERY_TRIGGER_ROI:
                     update_trade(
                         int(trade["id"]),
@@ -242,31 +280,23 @@ class RibbonWorker:
                         current_roi_pct,
                     )
 
-                # 3) Recovery exit
                 if recovery_mode and current_roi_pct >= RECOVERY_EXIT_ROI:
                     self._close_trade(trade, close_price, "recovery", "recovery_exit")
                     continue
 
-                # 4) Early failure
-                # İlk 8 barda en az +0.6% avantaj görmediyse çık
                 if (not recovery_mode) and entry_bars_open >= EARLY_FAILURE_BARS:
                     if max_favor < EARLY_FAILURE_MIN_FAVOR_PCT:
                         self._close_trade(trade, close_price, "time_exit", "early_failure_exit")
                         continue
 
-                # 5) Recovery timeout
-                # Recovery başladıktan 12 bar sonra hala toparlayamadıysa çık
                 if recovery_mode and recovery_bars_open >= RECOVERY_TIMEOUT_BARS:
                     self._close_trade(trade, close_price, "recovery_timeout", "recovery_timeout_exit")
                     continue
 
-                # 6) Max hold
-                # Recovery dışında trade çok yaşlandıysa çık
                 if (not recovery_mode) and entry_bars_open >= MAX_HOLD_BARS:
                     self._close_trade(trade, close_price, "time_exit", "max_hold_exit")
                     continue
 
-                # 7) Trend break
                 if ema200 is not None:
                     if side == "long" and close_price < ema200:
                         self._close_trade(trade, close_price, "trend_break", "ema200_break")
@@ -284,8 +314,13 @@ class RibbonWorker:
 
         for symbol in symbols:
             try:
-                df = self.scanner.fetch_closed_candle_df(symbol)
-                if df.empty or len(df) < 220:
+                df = self._fetch_df(symbol, TIMEFRAME)
+                if df is None or df.empty or len(df) < 220:
+                    continue
+
+                htf_df = self._fetch_df(symbol, HTF_TIMEFRAME)
+                if htf_df is None or htf_df.empty or len(htf_df) < 220:
+                    logger.info("Skipping %s because HTF dataframe is unavailable", symbol)
                     continue
 
                 signal_candle_time = str(df.iloc[-1]["datetime"])
@@ -293,7 +328,7 @@ class RibbonWorker:
                     continue
 
                 ticker = self.scanner.fetch_ticker(symbol)
-                signal = evaluate_signal(symbol, df, ticker)
+                signal = evaluate_signal(symbol, df, htf_df, ticker)
                 self.last_processed_candle_by_symbol[symbol] = signal_candle_time
 
                 if not signal:
@@ -335,7 +370,7 @@ class RibbonWorker:
                     "ema100": round(signal.ema100, 10),
                     "ema200": round(signal.ema200, 10),
                     "ema200_slope_pct": signal.ema200_slope_pct,
-                    "entry_note": "ribbon_signal_v3_filtered",
+                    "entry_note": "ribbon_signal_v4_htf",
                     "max_favor_pct": 0.0,
                     "max_adverse_pct": 0.0,
                     "recovery_mode": False,
