@@ -11,15 +11,21 @@ from config import (
     LEVERAGE,
     TIMEFRAME,
     TP_MOVE_PCT,
+    EMA_FAST,
+    EMA_TREND,
 )
 from db import fetch_open_trades, init_db, insert_trade, update_trade
 from scanner import BinanceFuturesScanner
 from strategy import evaluate_signal
 from telegram_bot import TelegramNotifier
 from trade_manager import can_open_trade
-from utils import pct_change, setup_logger
+from utils import ema, pct_change, setup_logger
 
 logger = setup_logger("ribbon.worker")
+
+# -----------------------------
+# v6 exit intelligence settings
+# -----------------------------
 
 # Ana TP
 TP_ROI_TARGET = 10.0
@@ -34,6 +40,14 @@ EARLY_FAILURE_MIN_FAVOR_PCT = 0.6
 
 MAX_HOLD_BARS = 24
 RECOVERY_TIMEOUT_BARS = 12
+
+# Profit protection
+BREAK_EVEN_ARM_ROI = 6.0
+BREAK_EVEN_FLOOR_ROI = 0.75
+
+TRAIL_ARM_ROI = 8.0
+PROFIT_GIVEBACK_TRIGGER_PCT = 0.90
+PROFIT_GIVEBACK_EXIT_RATIO = 0.45
 
 # HTF timeframe
 HTF_TIMEFRAME = "1h"
@@ -87,6 +101,13 @@ def _bars_since(start_iso: Optional[str], timeframe_minutes: int) -> int:
     seconds = max((now_dt - start_dt).total_seconds(), 0)
     bar_seconds = max(timeframe_minutes * 60, 60)
     return int(seconds // bar_seconds)
+
+
+def _prepare_exit_df(df):
+    df = df.copy()
+    df["ema20"] = ema(df["close"], EMA_FAST)
+    df["ema200"] = ema(df["close"], EMA_TREND)
+    return df
 
 
 class RibbonWorker:
@@ -175,11 +196,14 @@ class RibbonWorker:
                 if df.empty or len(df) < 220:
                     continue
 
+                df = _prepare_exit_df(df)
                 last = df.iloc[-1]
+
                 close_price = float(last["close"])
                 high_price = float(last["high"])
                 low_price = float(last["low"])
-                ema200 = float(last["ema200"]) if "ema200" in last else None
+                ema20 = float(last["ema20"])
+                ema200 = float(last["ema200"])
 
                 entry = float(trade["entry_price"])
                 side = str(trade["side"]).lower()
@@ -221,6 +245,9 @@ class RibbonWorker:
                 recovery_mode = bool(trade.get("recovery_mode") or False)
                 entry_bars_open = _bars_since(trade.get("entry_time"), self.timeframe_minutes)
                 recovery_bars_open = _bars_since(trade.get("recovery_mode_time"), self.timeframe_minutes)
+
+                max_favor_roi = max_favor * leverage
+                giveback_pct = max_favor - current_pnl_pct
 
                 # 1) Ana TP
                 if current_roi_pct >= TP_ROI_TARGET:
@@ -269,14 +296,38 @@ class RibbonWorker:
                     self._close_trade(trade, close_price, "time_exit", "max_hold_exit")
                     continue
 
-                # 7) Trend break
-                if ema200 is not None:
-                    if side == "long" and close_price < ema200:
-                        self._close_trade(trade, close_price, "trend_break", "ema200_break")
+                # 7) Break-even lock
+                if (not recovery_mode) and max_favor_roi >= BREAK_EVEN_ARM_ROI and current_roi_pct <= BREAK_EVEN_FLOOR_ROI:
+                    self._close_trade(trade, close_price, "profit_lock", "break_even_lock_exit")
+                    continue
+
+                # 8) Profit giveback exit
+                if (
+                    (not recovery_mode)
+                    and max_favor >= PROFIT_GIVEBACK_TRIGGER_PCT
+                    and max_favor > 0
+                    and giveback_pct >= (max_favor * PROFIT_GIVEBACK_EXIT_RATIO)
+                    and current_pnl_pct > 0
+                ):
+                    self._close_trade(trade, close_price, "profit_lock", "profit_giveback_exit")
+                    continue
+
+                # 9) EMA20 trail after decent profit
+                if (not recovery_mode) and max_favor_roi >= TRAIL_ARM_ROI:
+                    if side == "long" and close_price < ema20:
+                        self._close_trade(trade, close_price, "trail_exit", "ema20_trail_break")
                         continue
-                    if side == "short" and close_price > ema200:
-                        self._close_trade(trade, close_price, "trend_break", "ema200_break")
+                    if side == "short" and close_price > ema20:
+                        self._close_trade(trade, close_price, "trail_exit", "ema20_trail_break")
                         continue
+
+                # 10) Hard trend break
+                if side == "long" and close_price < ema200:
+                    self._close_trade(trade, close_price, "trend_break", "ema200_break")
+                    continue
+                if side == "short" and close_price > ema200:
+                    self._close_trade(trade, close_price, "trend_break", "ema200_break")
+                    continue
 
             except Exception as exc:
                 logger.exception("Open-trade check failed for %s: %s", symbol, exc)
@@ -344,7 +395,7 @@ class RibbonWorker:
                     "ema100": round(signal.ema100, 10),
                     "ema200": round(signal.ema200, 10),
                     "ema200_slope_pct": signal.ema200_slope_pct,
-                    "entry_note": "ribbon_signal_v4_htf",
+                    "entry_note": "ribbon_signal_v6_htf",
                     "max_favor_pct": 0.0,
                     "max_adverse_pct": 0.0,
                     "recovery_mode": False,
