@@ -30,7 +30,7 @@ MAX_EXTENSION_PCT = float(os.getenv("RIBBON_MAX_EXTENSION_PCT", "3.0"))
 MIN_EXTENSION_PCT = float(os.getenv("RIBBON_MIN_EXTENSION_PCT", "1.2"))
 
 # EMA200 slope mutlak minimum güç
-MIN_EMA200_SLOPE_PCT = float(os.getenv("RIBBON_MIN_EMA200_SLOPE_PCT", "0.08"))
+MIN_EMA200_SLOPE_PCT = float(os.getenv("RIBBON_MIN_EMA200_SLOPE_PCT", "0.12"))
 
 # Ribbon expansion minimum açıklık (%)
 # Formül: abs(ema20 - ema50) / close * 100
