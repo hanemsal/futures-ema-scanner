@@ -111,6 +111,8 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
         df["close"] >= df["open"], upper_wick
     ) / body.replace(0, pd.NA)
 
+    df = df.fillna(0)
+
     return df
 
 
