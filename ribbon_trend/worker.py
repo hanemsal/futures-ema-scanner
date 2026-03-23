@@ -24,22 +24,26 @@ from utils import ema, pct_change, setup_logger
 logger = setup_logger("ribbon.worker")
 
 # -----------------------------
-# v6 exit intelligence settings
+# v6.1 exit intelligence settings
 # -----------------------------
 
 # Ana TP
 TP_ROI_TARGET = 10.0
+
+# Hard stop: büyük zararları kes
+HARD_STOP_ROI = -12.0
 
 # Recovery
 RECOVERY_TRIGGER_ROI = -12.0
 RECOVERY_EXIT_ROI = 2.0
 
 # Zaman bazlı exitler
-EARLY_FAILURE_BARS = 8
+EARLY_FAILURE_BARS = 4
 EARLY_FAILURE_MIN_FAVOR_PCT = 0.6
+EARLY_FAILURE_ROI = -4.0
 
 MAX_HOLD_BARS = 24
-RECOVERY_TIMEOUT_BARS = 12
+RECOVERY_TIMEOUT_BARS = 6
 
 # Profit protection
 BREAK_EVEN_ARM_ROI = 6.0
@@ -254,7 +258,12 @@ class RibbonWorker:
                     self._close_trade(trade, close_price, "tp", "tp_roi_hit")
                     continue
 
-                # 2) Recovery mode'a gir
+                # 2) Hard stop: büyük zararları erkenden kes
+                if current_roi_pct <= HARD_STOP_ROI:
+                    self._close_trade(trade, close_price, "hard_stop", "hard_stop_exit")
+                    continue
+
+                # 3) Recovery mode'a gir
                 if (not recovery_mode) and current_roi_pct <= RECOVERY_TRIGGER_ROI:
                     update_trade(
                         int(trade["id"]),
@@ -275,33 +284,37 @@ class RibbonWorker:
                         current_roi_pct,
                     )
 
-                # 3) Recovery exit
+                # 4) Recovery exit
                 if recovery_mode and current_roi_pct >= RECOVERY_EXIT_ROI:
                     self._close_trade(trade, close_price, "recovery", "recovery_exit")
                     continue
 
-                # 4) Early failure
+                # 5) Early failure: trade yürümüyorsa ve zarardaysa erken çık
                 if (not recovery_mode) and entry_bars_open >= EARLY_FAILURE_BARS:
-                    if max_favor < EARLY_FAILURE_MIN_FAVOR_PCT:
+                    if max_favor < EARLY_FAILURE_MIN_FAVOR_PCT and current_roi_pct <= EARLY_FAILURE_ROI:
                         self._close_trade(trade, close_price, "time_exit", "early_failure_exit")
                         continue
 
-                # 5) Recovery timeout
+                # 6) Recovery timeout: recovery fazla uzamasın
                 if recovery_mode and recovery_bars_open >= RECOVERY_TIMEOUT_BARS:
                     self._close_trade(trade, close_price, "recovery_timeout", "recovery_timeout_exit")
                     continue
 
-                # 6) Max hold
+                # 7) Max hold
                 if (not recovery_mode) and entry_bars_open >= MAX_HOLD_BARS:
                     self._close_trade(trade, close_price, "time_exit", "max_hold_exit")
                     continue
 
-                # 7) Break-even lock
-                if (not recovery_mode) and max_favor_roi >= BREAK_EVEN_ARM_ROI and current_roi_pct <= BREAK_EVEN_FLOOR_ROI:
+                # 8) Break-even lock
+                if (
+                    (not recovery_mode)
+                    and max_favor_roi >= BREAK_EVEN_ARM_ROI
+                    and current_roi_pct <= BREAK_EVEN_FLOOR_ROI
+                ):
                     self._close_trade(trade, close_price, "profit_lock", "break_even_lock_exit")
                     continue
 
-                # 8) Profit giveback exit
+                # 9) Profit giveback exit
                 if (
                     (not recovery_mode)
                     and max_favor >= PROFIT_GIVEBACK_TRIGGER_PCT
@@ -312,7 +325,7 @@ class RibbonWorker:
                     self._close_trade(trade, close_price, "profit_lock", "profit_giveback_exit")
                     continue
 
-                # 9) EMA20 trail after decent profit
+                # 10) EMA20 trail after decent profit
                 if (not recovery_mode) and max_favor_roi >= TRAIL_ARM_ROI:
                     if side == "long" and close_price < ema20:
                         self._close_trade(trade, close_price, "trail_exit", "ema20_trail_break")
@@ -321,7 +334,7 @@ class RibbonWorker:
                         self._close_trade(trade, close_price, "trail_exit", "ema20_trail_break")
                         continue
 
-                # 10) Hard trend break
+                # 11) Hard trend break - son savunma
                 if side == "long" and close_price < ema200:
                     self._close_trade(trade, close_price, "trend_break", "ema200_break")
                     continue
@@ -395,7 +408,7 @@ class RibbonWorker:
                     "ema100": round(signal.ema100, 10),
                     "ema200": round(signal.ema200, 10),
                     "ema200_slope_pct": signal.ema200_slope_pct,
-                    "entry_note": "ribbon_signal_v6_htf",
+                    "entry_note": "ribbon_signal_v6_1_htf",
                     "max_favor_pct": 0.0,
                     "max_adverse_pct": 0.0,
                     "recovery_mode": False,
