@@ -31,16 +31,10 @@ from utils import pct_change, setup_logger
 
 logger = setup_logger("ribbon.worker.v3_short_only")
 
-# =========================================================
-# VERSION / TELEGRAM TAG
-# =========================================================
 ENTRY_NOTE = "ribbon_signal_v3_short_only"
 VERSION_TAG = "v3_short_only"
 TELEGRAM_TAG = "RIBBON V3 SHORT"
 
-# =========================================================
-# EXIT PARAMS
-# =========================================================
 TP_ROI_TARGET = 10.0
 
 RECOVERY_TRIGGER_ROI = -12.0
@@ -58,17 +52,11 @@ BREAK_EVEN_FLOOR_ROI = 0.3
 PROFIT_GIVEBACK_TRIGGER_PCT = 1.8
 PROFIT_GIVEBACK_EXIT_RATIO = 0.45
 
-TRAIL_ARM_ROI = 8.0
-
-# =========================================================
-# ENTRY FILTERS
-# =========================================================
 HTF_TIMEFRAME = "1h"
 
 MIN_NOTIONAL_24H_USDT = 10_000_000.0
 EMA200_SLOPE_LOOKBACK = 6
 
-# CSV analizine göre short edge
 MIN_SLOPE_PCT = -0.15
 MAX_SLOPE_PCT = 0.0
 
@@ -76,9 +64,7 @@ MIN_EXTENSION_PCT = -1.2
 MAX_EXTENSION_PCT = -0.3
 
 MIN_CANDLE_BODY_PCT = 0.18
-MIN_RIBBON_EXPANSION_PCT = 0.10
 
-# RSI FILTER
 RSI_LENGTH = 14
 RSI_MAX = 55.0
 
@@ -92,9 +78,10 @@ class SignalResult:
     reason: str
     extension_pct: float
     candle_body_pct: float
+    ema9: float
     ema20: float
-    ema50: float
-    ema100: float
+    ema21: float
+    ema55: float
     ema200: float
     ema200_slope_pct: float
     rsi: float
@@ -164,32 +151,27 @@ def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
 
     rs = avg_gain / avg_loss.replace(0, pd.NA)
     rsi = 100 - (100 / (1 + rs))
-
-    # loss 0 ise RSI 100 olsun
-    rsi = rsi.fillna(100)
-    return rsi
+    return rsi.fillna(100)
 
 
 def _prepare(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
 
-    x["ema20"] = _ema(x["close"], 20)
-    x["ema50"] = _ema(x["close"], 50)
-    x["ema100"] = _ema(x["close"], 100)
+    x["ema9"] = _ema(x["close"], 9)
+    x["ema20"] = _ema(x["close"], 20)   # exit için
+    x["ema21"] = _ema(x["close"], 21)
+    x["ema55"] = _ema(x["close"], 55)
     x["ema200"] = _ema(x["close"], 200)
 
     x["rsi"] = _rsi(x["close"], length=RSI_LENGTH)
 
+    # extension, ribbon'ın orta EMA'sı olan EMA21'e göre
     x["extension_pct"] = (
-        (x["close"] - x["ema20"]) / x["close"].replace(0, pd.NA)
+        (x["close"] - x["ema21"]) / x["ema21"].replace(0, pd.NA)
     ) * 100.0
 
     x["body_pct"] = (
         (x["close"] - x["open"]).abs() / x["open"].replace(0, pd.NA)
-    ) * 100.0
-
-    x["ribbon_expansion_pct"] = (
-        (x["ema20"] - x["ema50"]).abs() / x["close"].replace(0, pd.NA)
     ) * 100.0
 
     return x
@@ -238,9 +220,10 @@ def evaluate_signal(
     close_price = float(last["close"])
     open_price = float(last["open"])
 
+    ema9 = float(last["ema9"])
     ema20 = float(last["ema20"])
-    ema50 = float(last["ema50"])
-    ema100 = float(last["ema100"])
+    ema21 = float(last["ema21"])
+    ema55 = float(last["ema55"])
     ema200 = float(last["ema200"])
 
     htf_close = float(htf_last["close"])
@@ -248,22 +231,21 @@ def evaluate_signal(
 
     extension_pct = float(last["extension_pct"])
     body_pct = float(last["body_pct"])
-    ribbon_expansion_pct = float(last["ribbon_expansion_pct"])
     slope_pct = _ema200_slope_pct(df)
     htf_slope_pct = _ema200_slope_pct(htf_df)
     rsi = float(last["rsi"])
 
     signal_time = str(last["datetime"])
-    red = close_price < open_price
+    red_candle = close_price < open_price
 
     short_ok = all(
         [
             close_price < ema200,
             htf_close < htf_ema200,
-            ema20 < ema50 < ema100 < ema200,
-            red,
+            ema9 < ema21 < ema55,
+            close_price < ema9,
+            red_candle,
             body_pct >= MIN_CANDLE_BODY_PCT,
-            ribbon_expansion_pct >= MIN_RIBBON_EXPANSION_PCT,
             extension_pct >= MIN_EXTENSION_PCT,
             extension_pct <= MAX_EXTENSION_PCT,
             slope_pct >= MIN_SLOPE_PCT,
@@ -278,12 +260,12 @@ def evaluate_signal(
 
     reason = (
         f"[{TELEGRAM_TAG}] "
-        "short_only, close<ema200, htf_close<htf_ema200, "
-        "ema20<ema50<ema100<ema200, red_candle, "
-        f"extension_in_range({MIN_EXTENSION_PCT}..{MAX_EXTENSION_PCT}), "
+        "short_only, price<ema200, htf_price<htf_ema200, "
+        "ema9<ema21<ema55, price<ema9, red_candle, "
+        f"body>={MIN_CANDLE_BODY_PCT}, "
+        f"extension_ema21_in_range({MIN_EXTENSION_PCT}..{MAX_EXTENSION_PCT}), "
         f"slope_in_range({MIN_SLOPE_PCT}..{MAX_SLOPE_PCT}), "
-        f"rsi<{RSI_MAX}, "
-        "ribbon_expanded"
+        f"rsi<{RSI_MAX}"
     )
 
     return SignalResult(
@@ -294,9 +276,10 @@ def evaluate_signal(
         reason=reason,
         extension_pct=round(extension_pct, 4),
         candle_body_pct=round(body_pct, 4),
+        ema9=ema9,
         ema20=ema20,
-        ema50=ema50,
-        ema100=ema100,
+        ema21=ema21,
+        ema55=ema55,
         ema200=ema200,
         ema200_slope_pct=round(slope_pct, 5),
         rsi=round(rsi, 2),
@@ -327,23 +310,13 @@ class RibbonWorkerV3ShortOnly:
         try:
             self.notifier.send_signal(trade_id, signal, tp_price, sl_price)
         except Exception:
-            logger.exception(
-                "[%s] send_signal failed for trade_id=%s symbol=%s",
-                TELEGRAM_TAG,
-                trade_id,
-                signal.symbol,
-            )
+            logger.exception("[%s] send_signal failed for trade_id=%s symbol=%s", TELEGRAM_TAG, trade_id, signal.symbol)
 
     def _safe_send_exit(self, trade: dict) -> None:
         try:
             self.notifier.send_exit(trade)
         except Exception:
-            logger.exception(
-                "[%s] send_exit failed for trade_id=%s symbol=%s",
-                TELEGRAM_TAG,
-                trade.get("id"),
-                trade.get("symbol"),
-            )
+            logger.exception("[%s] send_exit failed for trade_id=%s symbol=%s", TELEGRAM_TAG, trade.get("id"), trade.get("symbol"))
 
     def _close_trade(self, trade: dict, exit_price: float, result: str, close_reason: str) -> None:
         trade_id = int(trade["id"])
@@ -397,11 +370,7 @@ class RibbonWorkerV3ShortOnly:
         if not open_trades:
             return
 
-        open_trades = [
-            t for t in open_trades
-            if str(t.get("entry_note", "")) == ENTRY_NOTE
-        ]
-
+        open_trades = [t for t in open_trades if str(t.get("entry_note", "")) == ENTRY_NOTE]
         if not open_trades:
             return
 
@@ -420,7 +389,7 @@ class RibbonWorkerV3ShortOnly:
 
                 close_price = float(last["close"])
                 ema20 = float(last["ema20"])
-                ema200 = float(last["ema200"])
+                ema55 = float(last["ema55"])
 
                 side = str(trade["side"]).lower()
                 entry_price = float(trade["entry_price"])
@@ -492,10 +461,9 @@ class RibbonWorkerV3ShortOnly:
                     self._close_trade(trade, close_price, "recovery", "recovery_exit")
                     continue
 
-                if (not recovery_mode) and entry_bars_open >= EARLY_FAILURE_BARS:
-                    if max_favor < EARLY_FAILURE_MIN_FAVOR_PCT:
-                        self._close_trade(trade, close_price, "time_exit", "early_failure_exit")
-                        continue
+                if (not recovery_mode) and entry_bars_open >= EARLY_FAILURE_BARS and max_favor < EARLY_FAILURE_MIN_FAVOR_PCT:
+                    self._close_trade(trade, close_price, "time_exit", "early_failure_exit")
+                    continue
 
                 if recovery_mode and recovery_bars_open >= RECOVERY_TIMEOUT_BARS:
                     self._close_trade(trade, close_price, "recovery_timeout", "recovery_timeout_exit")
@@ -523,13 +491,14 @@ class RibbonWorkerV3ShortOnly:
                     self._close_trade(trade, close_price, "profit_lock", "profit_giveback_exit")
                     continue
 
-                if (not recovery_mode) and max_favor_roi >= TRAIL_ARM_ROI:
-                    if side == "short" and close_price > ema20:
-                        self._close_trade(trade, close_price, "trail_exit", "ema20_trail_break")
-                        continue
+                # hard exit önce: EMA55 üstü
+                if side == "short" and close_price > ema55:
+                    self._close_trade(trade, close_price, "hard_exit", "ema55_hard_exit")
+                    continue
 
-                if side == "short" and close_price > ema200:
-                    self._close_trade(trade, close_price, "trend_break", "ema200_break")
+                # trend break exit: EMA20 üstü
+                if side == "short" and close_price > ema20:
+                    self._close_trade(trade, close_price, "trend_break", "ema20_trend_break")
                     continue
 
             except Exception as exc:
@@ -597,8 +566,8 @@ class RibbonWorkerV3ShortOnly:
                     "extension_pct": signal.extension_pct,
                     "candle_body_pct": signal.candle_body_pct,
                     "ema20": round(signal.ema20, 10),
-                    "ema50": round(signal.ema50, 10),
-                    "ema100": round(signal.ema100, 10),
+                    "ema50": round(signal.ema21, 10),   # db kolon uyumu için placeholder
+                    "ema100": round(signal.ema55, 10),  # db kolon uyumu için placeholder
                     "ema200": round(signal.ema200, 10),
                     "ema200_slope_pct": signal.ema200_slope_pct,
                     "entry_note": ENTRY_NOTE,
