@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 import pandas as pd
+import pandas_ta as ta
 
 from config import (
     DRY_RUN,
@@ -78,6 +79,10 @@ MAX_EXTENSION_PCT = -0.3
 MIN_CANDLE_BODY_PCT = 0.18
 MIN_RIBBON_EXPANSION_PCT = 0.10
 
+# RSI FILTER
+RSI_LENGTH = 14
+RSI_MAX = 55.0
+
 
 @dataclass
 class SignalResult:
@@ -93,6 +98,7 @@ class SignalResult:
     ema100: float
     ema200: float
     ema200_slope_pct: float
+    rsi: float
 
 
 def _calc_tp_price(entry_price: float, side: str) -> float:
@@ -157,6 +163,8 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
     x["ema100"] = _ema(x["close"], 100)
     x["ema200"] = _ema(x["close"], 200)
 
+    x["rsi"] = ta.rsi(x["close"], length=RSI_LENGTH)
+
     x["extension_pct"] = (
         (x["close"] - x["ema20"]) / x["close"].replace(0, pd.NA)
     ) * 100.0
@@ -209,6 +217,9 @@ def evaluate_signal(
     last = df.iloc[-1]
     htf_last = htf_df.iloc[-1]
 
+    if pd.isna(last["rsi"]):
+        return None
+
     close_price = float(last["close"])
     open_price = float(last["open"])
 
@@ -225,6 +236,7 @@ def evaluate_signal(
     ribbon_expansion_pct = float(last["ribbon_expansion_pct"])
     slope_pct = _ema200_slope_pct(df)
     htf_slope_pct = _ema200_slope_pct(htf_df)
+    rsi = float(last["rsi"])
 
     signal_time = str(last["datetime"])
     red = close_price < open_price
@@ -242,6 +254,7 @@ def evaluate_signal(
             slope_pct >= MIN_SLOPE_PCT,
             slope_pct <= MAX_SLOPE_PCT,
             htf_slope_pct <= 0,
+            rsi < RSI_MAX,
         ]
     )
 
@@ -254,6 +267,7 @@ def evaluate_signal(
         "ema20<ema50<ema100<ema200, red_candle, "
         f"extension_in_range({MIN_EXTENSION_PCT}..{MAX_EXTENSION_PCT}), "
         f"slope_in_range({MIN_SLOPE_PCT}..{MAX_SLOPE_PCT}), "
+        f"rsi<{RSI_MAX}, "
         "ribbon_expanded"
     )
 
@@ -270,6 +284,7 @@ def evaluate_signal(
         ema100=ema100,
         ema200=ema200,
         ema200_slope_pct=round(slope_pct, 5),
+        rsi=round(rsi, 2),
     )
 
 
@@ -539,7 +554,7 @@ class RibbonWorkerV3ShortOnly:
 
                 if DRY_RUN:
                     logger.info(
-                        "[%s] DRY RUN | %s %s entry=%.8f tp=%.8f sl=%.8f slope=%.5f ext=%.4f",
+                        "[%s] DRY RUN | %s %s entry=%.8f tp=%.8f sl=%.8f slope=%.5f ext=%.4f rsi=%.2f",
                         TELEGRAM_TAG,
                         signal.side.upper(),
                         signal.symbol,
@@ -548,6 +563,7 @@ class RibbonWorkerV3ShortOnly:
                         sl_price,
                         signal.ema200_slope_pct,
                         signal.extension_pct,
+                        signal.rsi,
                     )
                     continue
 
@@ -584,7 +600,7 @@ class RibbonWorkerV3ShortOnly:
                 self._safe_send_signal(trade_id, signal, tp_price, sl_price)
 
                 logger.info(
-                    "[%s] Opened trade %s | %s %s entry=%.8f tp=%.8f slope=%.5f ext=%.4f",
+                    "[%s] Opened trade %s | %s %s entry=%.8f tp=%.8f slope=%.5f ext=%.4f rsi=%.2f",
                     TELEGRAM_TAG,
                     trade_id,
                     signal.side.upper(),
@@ -593,6 +609,7 @@ class RibbonWorkerV3ShortOnly:
                     tp_price,
                     signal.ema200_slope_pct,
                     signal.extension_pct,
+                    signal.rsi,
                 )
 
             except Exception as exc:
