@@ -26,9 +26,17 @@ class TelegramNotifier:
             logger.exception("Telegram send failed: %s", exc)
 
     def send_signal(self, trade_id: int, signal, tp_price: float, sl_price: float) -> None:
-        emoji = "🟢" if signal.side == "long" else "🔴"
+
+        # short worker ayırt etme
+        if "v3_short_only" in str(signal.reason):
+            title = "RIBBON V3 SHORT"
+            emoji = "🟥"
+        else:
+            title = f"RIBBON {signal.side.upper()}"
+            emoji = "🟢" if signal.side == "long" else "🔴"
+
         text = (
-            f"{emoji} <b>RIBBON {signal.side.upper()}</b>\n"
+            f"{emoji} <b>{title}</b>\n"
             f"Coin: <b>{signal.symbol}</b>\n"
             f"TF: {TIMEFRAME}\n"
             f"Trade ID: {trade_id}\n"
