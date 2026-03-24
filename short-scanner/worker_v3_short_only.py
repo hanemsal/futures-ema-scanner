@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 import pandas as pd
-import pandas_ta as ta
 
 from config import (
     DRY_RUN,
@@ -155,6 +154,22 @@ def _ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
+def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+
+    avg_gain = gain.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
+    avg_loss = loss.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
+
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rsi = 100 - (100 / (1 + rs))
+
+    # loss 0 ise RSI 100 olsun
+    rsi = rsi.fillna(100)
+    return rsi
+
+
 def _prepare(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
 
@@ -163,7 +178,7 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
     x["ema100"] = _ema(x["close"], 100)
     x["ema200"] = _ema(x["close"], 200)
 
-    x["rsi"] = ta.rsi(x["close"], length=RSI_LENGTH)
+    x["rsi"] = _rsi(x["close"], length=RSI_LENGTH)
 
     x["extension_pct"] = (
         (x["close"] - x["ema20"]) / x["close"].replace(0, pd.NA)
