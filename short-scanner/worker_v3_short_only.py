@@ -3,9 +3,8 @@ from __future__ import annotations
 import os
 import sys
 
-# repo root'u python path'e ekle
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", "ribbon_trend"))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -33,10 +32,11 @@ from utils import pct_change, setup_logger
 logger = setup_logger("ribbon.worker.v3_short_only")
 
 # =========================================================
-# VERSION
+# VERSION / TELEGRAM TAG
 # =========================================================
 ENTRY_NOTE = "ribbon_signal_v3_short_only"
 VERSION_TAG = "v3_short_only"
+TELEGRAM_TAG = "RIBBON V3 SHORT"
 
 # =========================================================
 # EXIT PARAMS
@@ -62,30 +62,23 @@ TRAIL_ARM_ROI = 8.0
 
 # =========================================================
 # ENTRY FILTERS
-# CSV analizine göre optimize edilmiş SHORT-only filtreler
 # =========================================================
 HTF_TIMEFRAME = "1h"
 
 MIN_NOTIONAL_24H_USDT = 10_000_000.0
-
 EMA200_SLOPE_LOOKBACK = 6
 
-# Ana edge:
-# slope yaklaşık -0.15 ile 0 arası
+# CSV analizine göre short edge
 MIN_SLOPE_PCT = -0.15
 MAX_SLOPE_PCT = 0.0
 
-# Ana edge:
-# extension yaklaşık -1.2 ile -0.3 arası
 MIN_EXTENSION_PCT = -1.2
 MAX_EXTENSION_PCT = -0.3
 
 MIN_CANDLE_BODY_PCT = 0.18
 MIN_RIBBON_EXPANSION_PCT = 0.10
 
-# =========================================================
-# DATA MODEL
-# =========================================================
+
 @dataclass
 class SignalResult:
     side: str
@@ -102,9 +95,6 @@ class SignalResult:
     ema200_slope_pct: float
 
 
-# =========================================================
-# HELPERS
-# =========================================================
 def _calc_tp_price(entry_price: float, side: str) -> float:
     tp_move = TP_MOVE_PCT / 100.0
     if side == "long":
@@ -167,17 +157,14 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
     x["ema100"] = _ema(x["close"], 100)
     x["ema200"] = _ema(x["close"], 200)
 
-    # close - ema20 / close * 100
     x["extension_pct"] = (
         (x["close"] - x["ema20"]) / x["close"].replace(0, pd.NA)
     ) * 100.0
 
-    # candle body %
     x["body_pct"] = (
         (x["close"] - x["open"]).abs() / x["open"].replace(0, pd.NA)
     ) * 100.0
 
-    # ribbon expansion %
     x["ribbon_expansion_pct"] = (
         (x["ema20"] - x["ema50"]).abs() / x["close"].replace(0, pd.NA)
     ) * 100.0
@@ -204,7 +191,12 @@ def _passes_common_filters(df: pd.DataFrame, ticker: dict) -> bool:
     return True
 
 
-def evaluate_signal(symbol: str, df: pd.DataFrame, htf_df: pd.DataFrame, ticker: dict) -> Optional[SignalResult]:
+def evaluate_signal(
+    symbol: str,
+    df: pd.DataFrame,
+    htf_df: pd.DataFrame,
+    ticker: dict,
+) -> Optional[SignalResult]:
     if df.empty or htf_df.empty:
         return None
 
@@ -237,16 +229,6 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, htf_df: pd.DataFrame, ticker:
     signal_time = str(last["datetime"])
     red = close_price < open_price
 
-    # SHORT ONLY
-    # Ana mantık:
-    # - mevcut tf aşağı trend
-    # - htf de aşağı rejimi teyit etsin
-    # - ribbon bearish hizalı
-    # - mum kırmızı
-    # - body yeterli
-    # - ribbon yeterince açık
-    # - extension tam edge bölgesinde
-    # - ema200 slope hafif negatif bölgede
     short_ok = all(
         [
             close_price < ema200,
@@ -266,18 +248,21 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, htf_df: pd.DataFrame, ticker:
     if not short_ok:
         return None
 
+    reason = (
+        f"[{TELEGRAM_TAG}] "
+        "short_only, close<ema200, htf_close<htf_ema200, "
+        "ema20<ema50<ema100<ema200, red_candle, "
+        f"extension_in_range({MIN_EXTENSION_PCT}..{MAX_EXTENSION_PCT}), "
+        f"slope_in_range({MIN_SLOPE_PCT}..{MAX_SLOPE_PCT}), "
+        "ribbon_expanded"
+    )
+
     return SignalResult(
         side="short",
         symbol=symbol,
         entry_price=close_price,
         signal_candle_time=signal_time,
-        reason=(
-            "short_only, close<ema200, htf_close<htf_ema200, "
-            "ema20<ema50<ema100<ema200, red_candle, "
-            f"extension_in_range({MIN_EXTENSION_PCT}..{MAX_EXTENSION_PCT}), "
-            f"slope_in_range({MIN_SLOPE_PCT}..{MAX_SLOPE_PCT}), "
-            "ribbon_expanded"
-        ),
+        reason=reason,
         extension_pct=round(extension_pct, 4),
         candle_body_pct=round(body_pct, 4),
         ema20=ema20,
@@ -288,9 +273,6 @@ def evaluate_signal(symbol: str, df: pd.DataFrame, htf_df: pd.DataFrame, ticker:
     )
 
 
-# =========================================================
-# WORKER
-# =========================================================
 class RibbonWorkerV3ShortOnly:
     def __init__(self) -> None:
         self.scanner = BinanceFuturesScanner()
@@ -310,6 +292,28 @@ class RibbonWorkerV3ShortOnly:
             self.last_markets_reload = now
 
         return symbols
+
+    def _safe_send_signal(self, trade_id: int, signal: SignalResult, tp_price: float, sl_price: float) -> None:
+        try:
+            self.notifier.send_signal(trade_id, signal, tp_price, sl_price)
+        except Exception:
+            logger.exception(
+                "[%s] send_signal failed for trade_id=%s symbol=%s",
+                TELEGRAM_TAG,
+                trade_id,
+                signal.symbol,
+            )
+
+    def _safe_send_exit(self, trade: dict) -> None:
+        try:
+            self.notifier.send_exit(trade)
+        except Exception:
+            logger.exception(
+                "[%s] send_exit failed for trade_id=%s symbol=%s",
+                TELEGRAM_TAG,
+                trade.get("id"),
+                trade.get("symbol"),
+            )
 
     def _close_trade(self, trade: dict, exit_price: float, result: str, close_reason: str) -> None:
         trade_id = int(trade["id"])
@@ -346,13 +350,11 @@ class RibbonWorkerV3ShortOnly:
         trade["result"] = result
         trade["close_reason"] = close_reason
 
-        try:
-            self.notifier.send_exit(trade)
-        except Exception:
-            logger.exception("send_exit failed for trade_id=%s", trade_id)
+        self._safe_send_exit(trade)
 
         logger.info(
-            "Closed trade %s %s => %s | roi=%.2f%% reason=%s",
+            "[%s] Closed trade %s %s => %s | roi=%.2f%% reason=%s",
+            TELEGRAM_TAG,
             trade_id,
             trade["symbol"],
             result,
@@ -365,7 +367,6 @@ class RibbonWorkerV3ShortOnly:
         if not open_trades:
             return
 
-        # sadece bu worker'ın açtığı trade'leri yönetsin
         open_trades = [
             t for t in open_trades
             if str(t.get("entry_note", "")) == ENTRY_NOTE
@@ -374,7 +375,7 @@ class RibbonWorkerV3ShortOnly:
         if not open_trades:
             return
 
-        logger.info("Checking %s open trades for %s...", len(open_trades), ENTRY_NOTE)
+        logger.info("[%s] Checking %s open trades...", TELEGRAM_TAG, len(open_trades))
 
         for trade in open_trades:
             symbol = trade["symbol"]
@@ -432,12 +433,10 @@ class RibbonWorkerV3ShortOnly:
                 max_favor_roi = max_favor * leverage
                 giveback_pct = max_favor - current_pnl_pct
 
-                # 1) Ana TP
                 if current_roi_pct >= TP_ROI_TARGET:
                     self._close_trade(trade, close_price, "tp", "tp_roi_hit")
                     continue
 
-                # 2) Recovery mode'a gir
                 if (not recovery_mode) and current_roi_pct <= RECOVERY_TRIGGER_ROI:
                     update_trade(
                         int(trade["id"]),
@@ -452,34 +451,30 @@ class RibbonWorkerV3ShortOnly:
                     recovery_bars_open = 0
 
                     logger.info(
-                        "Trade %s %s entered recovery mode at roi=%.2f%%",
+                        "[%s] Trade %s %s entered recovery mode at roi=%.2f%%",
+                        TELEGRAM_TAG,
                         trade["id"],
                         symbol,
                         current_roi_pct,
                     )
 
-                # 3) Recovery exit
                 if recovery_mode and current_roi_pct >= RECOVERY_EXIT_ROI:
                     self._close_trade(trade, close_price, "recovery", "recovery_exit")
                     continue
 
-                # 4) Early failure
                 if (not recovery_mode) and entry_bars_open >= EARLY_FAILURE_BARS:
                     if max_favor < EARLY_FAILURE_MIN_FAVOR_PCT:
                         self._close_trade(trade, close_price, "time_exit", "early_failure_exit")
                         continue
 
-                # 5) Recovery timeout
                 if recovery_mode and recovery_bars_open >= RECOVERY_TIMEOUT_BARS:
                     self._close_trade(trade, close_price, "recovery_timeout", "recovery_timeout_exit")
                     continue
 
-                # 6) Max hold
                 if (not recovery_mode) and entry_bars_open >= MAX_HOLD_BARS:
                     self._close_trade(trade, close_price, "time_exit", "max_hold_exit")
                     continue
 
-                # 7) Break-even lock
                 if (
                     (not recovery_mode)
                     and max_favor_roi >= BREAK_EVEN_ARM_ROI
@@ -488,7 +483,6 @@ class RibbonWorkerV3ShortOnly:
                     self._close_trade(trade, close_price, "profit_lock", "break_even_lock_exit")
                     continue
 
-                # 8) Profit giveback exit
                 if (
                     (not recovery_mode)
                     and max_favor >= PROFIT_GIVEBACK_TRIGGER_PCT
@@ -499,23 +493,21 @@ class RibbonWorkerV3ShortOnly:
                     self._close_trade(trade, close_price, "profit_lock", "profit_giveback_exit")
                     continue
 
-                # 9) EMA20 trail after decent profit
                 if (not recovery_mode) and max_favor_roi >= TRAIL_ARM_ROI:
                     if side == "short" and close_price > ema20:
                         self._close_trade(trade, close_price, "trail_exit", "ema20_trail_break")
                         continue
 
-                # 10) Hard trend break
                 if side == "short" and close_price > ema200:
                     self._close_trade(trade, close_price, "trend_break", "ema200_break")
                     continue
 
             except Exception as exc:
-                logger.exception("Open-trade check failed for %s: %s", symbol, exc)
+                logger.exception("[%s] Open-trade check failed for %s: %s", TELEGRAM_TAG, symbol, exc)
 
     def scan_new_signals(self) -> None:
         symbols = self.reload_symbols_if_needed()
-        logger.info("Scanning %s symbols for %s...", len(symbols), ENTRY_NOTE)
+        logger.info("[%s] Scanning %s symbols...", TELEGRAM_TAG, len(symbols))
 
         for symbol in symbols:
             try:
@@ -538,7 +530,6 @@ class RibbonWorkerV3ShortOnly:
                 if not signal:
                     continue
 
-                # aynı sembolde mevcut açık trade varsa yenisini açma
                 if not can_open_trade(symbol):
                     continue
 
@@ -548,7 +539,8 @@ class RibbonWorkerV3ShortOnly:
 
                 if DRY_RUN:
                     logger.info(
-                        "DRY RUN | %s %s entry=%.8f tp=%.8f sl=%.8f slope=%.5f ext=%.4f",
+                        "[%s] DRY RUN | %s %s entry=%.8f tp=%.8f sl=%.8f slope=%.5f ext=%.4f",
+                        TELEGRAM_TAG,
                         signal.side.upper(),
                         signal.symbol,
                         signal.entry_price,
@@ -589,14 +581,11 @@ class RibbonWorkerV3ShortOnly:
                 }
 
                 trade_id = insert_trade(payload)
-
-                try:
-                    self.notifier.send_signal(trade_id, signal, tp_price, sl_price)
-                except Exception:
-                    logger.exception("send_signal failed for trade_id=%s", trade_id)
+                self._safe_send_signal(trade_id, signal, tp_price, sl_price)
 
                 logger.info(
-                    "Opened trade %s | %s %s entry=%.8f tp=%.8f slope=%.5f ext=%.4f",
+                    "[%s] Opened trade %s | %s %s entry=%.8f tp=%.8f slope=%.5f ext=%.4f",
+                    TELEGRAM_TAG,
                     trade_id,
                     signal.side.upper(),
                     signal.symbol,
@@ -607,14 +596,16 @@ class RibbonWorkerV3ShortOnly:
                 )
 
             except Exception as exc:
-                logger.exception("Signal scan failed for %s: %s", symbol, exc)
+                logger.exception("[%s] Signal scan failed for %s: %s", TELEGRAM_TAG, symbol, exc)
 
     def run_forever(self) -> None:
         init_db()
         logger.info(
-            "Ribbon V3 Short-Only worker started. DRY_RUN=%s | entry_note=%s",
+            "[%s] Ribbon V3 Short-Only worker started. DRY_RUN=%s | entry_note=%s | version=%s",
+            TELEGRAM_TAG,
             DRY_RUN,
             ENTRY_NOTE,
+            VERSION_TAG,
         )
 
         while True:
@@ -622,7 +613,7 @@ class RibbonWorkerV3ShortOnly:
                 self.process_open_trades()
                 self.scan_new_signals()
             except Exception as exc:
-                logger.exception("Worker loop error: %s", exc)
+                logger.exception("[%s] Worker loop error: %s", TELEGRAM_TAG, exc)
 
             time.sleep(LOOP_SLEEP_SECONDS)
 
