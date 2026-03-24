@@ -1,10 +1,13 @@
 import psycopg2
 import os
+from config import VERSION
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
+
 def connect():
     return psycopg2.connect(DATABASE_URL)
+
 
 def save_signal(symbol, side, price):
 
@@ -16,7 +19,7 @@ def save_signal(symbol, side, price):
         INSERT INTO signals(symbol,side,price,version)
         VALUES(%s,%s,%s,%s)
         """,
-        (symbol,side,price,"EMA9")
+        (symbol, side, price, VERSION)
     )
 
     conn.commit()
