@@ -234,6 +234,7 @@ def evaluate_signal(
     slope_pct = _ema200_slope_pct(df)
     htf_slope_pct = _ema200_slope_pct(htf_df)
     rsi = float(last["rsi"])
+    rsi_prev = float(df.iloc[-2]["rsi"])
 
     signal_time = str(last["datetime"])
     red_candle = close_price < open_price
@@ -252,6 +253,7 @@ def evaluate_signal(
             slope_pct <= MAX_SLOPE_PCT,
             htf_slope_pct <= 0,
             rsi < RSI_MAX,
+            rsi < rsi_prev,
         ]
     )
 
