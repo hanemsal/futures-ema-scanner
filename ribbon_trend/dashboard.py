@@ -547,7 +547,7 @@ def home():
             background:#0f172a;
             color:white;
             font-family:Arial, sans-serif;
-            padding:40px;
+            padding:20px 20px 60px 20px;
         }}
         .card {{
             background:#111827;
@@ -886,9 +886,11 @@ def ribbon():
                 text-decoration:none;
             }}
             .table-wrap {{
-                overflow-x:auto;
+                overflow:auto;
+                max-height:75vh;
                 border:1px solid #1f2937;
                 border-radius:12px;
+                margin-bottom:24px;
             }}
             .chart-card {{
                 background:#111827;
