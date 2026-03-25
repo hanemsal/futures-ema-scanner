@@ -37,17 +37,20 @@ def ema(series: pd.Series, length: int) -> pd.Series:
 
 
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    """
+    TradingView'e daha yakın Wilder / RMA RSI
+    """
     delta = series.diff()
 
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.rolling(length).mean()
-    avg_loss = loss.rolling(length).mean()
+    avg_gain = gain.ewm(alpha=1 / length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / length, adjust=False).mean()
 
     rs = avg_gain / avg_loss.replace(0, pd.NA)
-
     out = 100 - (100 / (1 + rs))
+
     return out.fillna(0)
 
 
@@ -168,11 +171,8 @@ class EMA9Worker:
         entry_price = float(trade["entry_price"])
 
         if side == "long":
-
             pnl_pct = pct_change(exit_price, entry_price)
-
         else:
-
             pnl_pct = pct_change(entry_price, exit_price)
 
         roi_pct = pnl_pct * float(trade["leverage"])
@@ -196,9 +196,7 @@ class EMA9Worker:
         update_trade(trade_id, payload)
 
         trade["exit_price"] = payload["exit_price"]
-
         trade["pnl_pct"] = payload["pnl_pct"]
-
         trade["roi_pct"] = payload["roi_pct"]
 
         self.notifier.send_exit(trade, close_reason)
@@ -268,7 +266,10 @@ class EMA9Worker:
 
         self.notifier.send_signal(trade_id, payload)
 
-        print(f"Opened trade {trade_id} | {side.upper()} {symbol}")
+        print(
+            f"Opened trade {trade_id} | {side.upper()} {symbol} | "
+            f"RSI={round(rsi_value, 2)}"
+        )
 
     def process_symbol(self, symbol: str) -> None:
 
@@ -319,11 +320,9 @@ class EMA9Worker:
                 open_side = str(open_trade["side"]).lower()
 
                 if open_side == "long" and short_cross:
-
                     self.close_trade(open_trade, price_now, "ema3_below_ema9")
 
                 if open_side == "short" and long_cross and rsi_long_ok:
-
                     self.close_trade(open_trade, price_now, "ema3_above_ema9")
 
                     self.maybe_open_trade(
@@ -341,7 +340,6 @@ class EMA9Worker:
                 return
 
             if long_cross and rsi_long_ok:
-
                 self.maybe_open_trade(
                     symbol,
                     "long",
@@ -355,7 +353,6 @@ class EMA9Worker:
                 )
 
             if short_cross:
-
                 self.maybe_open_trade(
                     symbol,
                     "short",
@@ -387,9 +384,7 @@ class EMA9Worker:
                 print(f"Scanning {len(symbols)} symbols...")
 
                 for symbol in symbols:
-
                     self.process_symbol(symbol)
-
                     time.sleep(SYMBOL_SLEEP_SECONDS)
 
             except Exception as exc:
