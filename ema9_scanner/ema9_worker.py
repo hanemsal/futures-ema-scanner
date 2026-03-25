@@ -79,18 +79,22 @@ class EMA9Worker:
 
         symbols: List[str] = []
         for symbol, market in markets.items():
+            if not market.get("active", True):
+                continue
             if not market.get("contract"):
                 continue
-            if market.get("quote") != "USDT":
+            if not market.get("swap"):
                 continue
-            if not market.get("active", True):
+            if market.get("future"):
+                continue
+            if market.get("quote") != "USDT":
                 continue
             symbols.append(symbol)
 
         symbols.sort()
         self.symbols_cache = symbols
         self.last_markets_load_ts = now
-        print(f"Symbols loaded: {len(symbols)}")
+        print(f"Symbols loaded (USDT perpetual only): {len(symbols)}")
         return symbols
 
     def fetch_df(self, symbol: str) -> pd.DataFrame:
@@ -176,7 +180,7 @@ class EMA9Worker:
             "reason": reason,
             "extension_pct": round(((ema3_value - ema9_value) / price) * 100.0 if price else 0.0, 4),
             "candle_body_pct": 0.0,
-            "ema20": round(ema3_value, 10),   # dashboard kolonlarını doldurmak için
+            "ema20": round(ema3_value, 10),
             "ema50": round(ema9_value, 10),
             "ema100": 0.0,
             "ema200": 0.0,
@@ -190,7 +194,7 @@ class EMA9Worker:
             "floating_pnl_pct": 0.0,
             "floating_roi_pct": 0.0,
             "last_price_time": now_iso,
-            "rsi_value": round(rsi_value, 2),  # telegram için payload üzerinde kalacak, DB'ye yazılmayacak
+            "rsi_value": round(rsi_value, 2),
             "notional_24h_text": f"{notional_24h / 1_000_000:.2f}M",
         }
 
