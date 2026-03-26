@@ -24,6 +24,8 @@ class TelegramNotifier:
             print("Telegram send error:", exc)
 
     def send_signal(self, trade_id: int, payload: dict) -> None:
+        version = payload.get("entry_note", "-")
+
         self._send(
             "\n".join(
                 [
@@ -31,7 +33,7 @@ class TelegramNotifier:
                     f"Trade ID: {trade_id}",
                     f"Coin: {payload['symbol']}",
                     f"TF: {payload['timeframe']}",
-                    f"Version: EMA9_4H",
+                    f"Version: {version}",
                     f"Entry: {payload['entry_price']}",
                     f"Lev: x{payload['leverage']}",
                     f"RSI: {payload.get('rsi_value', '-')}",
@@ -42,13 +44,15 @@ class TelegramNotifier:
         )
 
     def send_exit(self, trade: dict, close_reason: str) -> None:
+        version = trade.get("entry_note", "-")
+
         self._send(
             "\n".join(
                 [
                     "✅ EMA9 EXIT",
                     f"Coin: {trade['symbol']}",
                     f"Side: {str(trade['side']).upper()}",
-                    f"Version: EMA9_4H",
+                    f"Version: {version}",
                     f"Exit: {trade['exit_price']}",
                     f"PnL: {trade['pnl_pct']:.4f}%",
                     f"ROI: {trade['roi_pct']:.4f}%",
