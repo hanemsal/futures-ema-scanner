@@ -180,7 +180,7 @@ class EMA9Worker:
 
         self.notifier.send_exit(trade, close_reason)
 
-        print(f"Closed trade {trade_id} {trade['symbol']} reason={close_reason}")
+        print(f"Closed trade {trade_id} | {trade['symbol']} | reason={close_reason}")
 
     def maybe_open_trade(
         self,
@@ -236,7 +236,7 @@ class EMA9Worker:
 
         print(
             f"Opened trade {trade_id} | {side.upper()} {symbol} | "
-            f"RSI={round(rsi_value, 2)}"
+            f"entry={round(price, 10)} | RSI={round(rsi_value, 2)}"
         )
 
     def process_symbol(self, symbol: str) -> None:
@@ -258,7 +258,7 @@ class EMA9Worker:
 
             # LIVE CROSS:
             # prev = son kapanmış mum
-            # last = şu an açık olan canlı mum
+            # last = şu an açık mum
             prev = df.iloc[-2]
             last = df.iloc[-1]
 
@@ -275,37 +275,41 @@ class EMA9Worker:
 
             signal_candle_time = str(last["datetime"])
 
+            # GERÇEK KESİŞİM
             long_cross = prev_ema3 <= prev_ema9 and ema3_now > ema9_now
             short_cross = prev_ema3 >= prev_ema9 and ema3_now < ema9_now
 
+            # SADECE YÖN DURUMU
+            ema_bullish_now = ema3_now > ema9_now
+            ema_bearish_now = ema3_now < ema9_now
+
             ema9_slope_up = ema9_now > prev_ema9
-            rsi_long_ok = rsi_now > RSI_LONG_THRESHOLD and rsi_now > prev_rsi and ema9_slope_up
+
+            rsi_long_ok = (
+                rsi_now > RSI_LONG_THRESHOLD
+                and rsi_now > prev_rsi
+                and ema9_slope_up
+            )
 
             open_trade = fetch_open_trade_for_symbol(symbol)
 
             if open_trade:
                 open_side = str(open_trade["side"]).lower()
 
-                if open_side == "long" and short_cross:
-                    self.close_trade(open_trade, price_now, "ema3_below_ema9")
+                if open_side == "long":
+                    # Long açıkken exit için gerçek ters kesişim bekleme;
+                    # EMA3 artık EMA9 altına düştüyse kapat.
+                    if ema_bearish_now:
+                        self.close_trade(open_trade, price_now, "ema3_below_ema9")
+                    return
 
-                if open_side == "short" and long_cross and rsi_long_ok:
-                    self.close_trade(open_trade, price_now, "ema3_above_ema9")
+                if open_side == "short":
+                    # Short açıkken exit için EMA3 artık EMA9 üstüne çıktıysa kapat.
+                    if ema_bullish_now:
+                        self.close_trade(open_trade, price_now, "ema3_above_ema9")
+                    return
 
-                    self.maybe_open_trade(
-                        symbol,
-                        "long",
-                        price_now,
-                        signal_candle_time,
-                        "EMA3 crossed above EMA9 | RSI rising | EMA9 slope up",
-                        ema3_now,
-                        ema9_now,
-                        rsi_now,
-                        notional_24h,
-                    )
-
-                return
-
+            # Açık trade yoksa sadece GERÇEK KESİŞİM ile pozisyon aç
             if long_cross and rsi_long_ok:
                 self.maybe_open_trade(
                     symbol,
@@ -318,6 +322,7 @@ class EMA9Worker:
                     rsi_now,
                     notional_24h,
                 )
+                return
 
             if short_cross:
                 self.maybe_open_trade(
@@ -331,6 +336,7 @@ class EMA9Worker:
                     rsi_now,
                     notional_24h,
                 )
+                return
 
         except Exception as exc:
             print(f"Signal scan failed for {symbol}: {exc}")
