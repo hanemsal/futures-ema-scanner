@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import List
 
 import ccxt
 import pandas as pd
@@ -38,6 +38,9 @@ def ema(series: pd.Series, length: int) -> pd.Series:
 
 
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    """
+    TradingView'e yakın Wilder / RMA RSI
+    """
     delta = series.diff()
 
     gain = delta.clip(lower=0)
@@ -59,9 +62,7 @@ def pct_change(new_value: float, old_value: float) -> float:
 
 
 class EMA9Worker:
-
     def __init__(self) -> None:
-
         exchange_class = getattr(ccxt, EXCHANGE_ID)
 
         self.exchange = exchange_class(
@@ -77,7 +78,6 @@ class EMA9Worker:
         self.symbols_cache: List[str] = []
 
     def load_symbols(self, force: bool = False) -> List[str]:
-
         now = time.time()
 
         if self.symbols_cache and not force and (now - self.last_markets_load_ts) < 3600:
@@ -86,23 +86,17 @@ class EMA9Worker:
         print("Loading markets...")
 
         markets = self.exchange.load_markets()
-
         symbols: List[str] = []
 
         for symbol, market in markets.items():
-
             if not market.get("active", True):
                 continue
-
             if not market.get("contract"):
                 continue
-
             if not market.get("swap"):
                 continue
-
             if market.get("future"):
                 continue
-
             if market.get("quote") != "USDT":
                 continue
 
@@ -114,11 +108,9 @@ class EMA9Worker:
         self.last_markets_load_ts = now
 
         print(f"Symbols loaded (USDT perpetual only): {len(symbols)}")
-
         return symbols
 
     def fetch_df(self, symbol: str) -> pd.DataFrame:
-
         ohlcv = self.exchange.fetch_ohlcv(
             symbol,
             timeframe=TIMEFRAME,
@@ -154,7 +146,6 @@ class EMA9Worker:
         exit_price: float,
         close_reason: str,
     ) -> None:
-
         trade_id = int(trade["id"])
         side = str(trade["side"]).lower()
         entry_price = float(trade["entry_price"])
@@ -165,7 +156,6 @@ class EMA9Worker:
             pnl_pct = pct_change(entry_price, exit_price)
 
         roi_pct = pnl_pct * float(trade["leverage"])
-
         now_iso = datetime.now(timezone.utc).isoformat()
 
         payload = {
@@ -204,14 +194,11 @@ class EMA9Worker:
         rsi_value: float,
         notional_24h: float,
     ) -> None:
-
         same_side_open = fetch_open_trade_for_symbol_side(symbol, side)
-
         if same_side_open:
             return
 
         any_open = fetch_open_trade_for_symbol(symbol)
-
         if any_open:
             return
 
@@ -247,12 +234,13 @@ class EMA9Worker:
 
         self.notifier.send_signal(trade_id, payload)
 
-        print(f"Opened trade {trade_id} | {side.upper()} {symbol}")
+        print(
+            f"Opened trade {trade_id} | {side.upper()} {symbol} | "
+            f"RSI={round(rsi_value, 2)}"
+        )
 
     def process_symbol(self, symbol: str) -> None:
-
         try:
-
             ticker = self.fetch_ticker(symbol)
             notional_24h = float(ticker.get("quoteVolume") or 0.0)
 
@@ -268,40 +256,40 @@ class EMA9Worker:
             df["ema9"] = ema(df["close"], EMA_SLOW)
             df["rsi"] = rsi(df["close"], RSI_LENGTH)
 
-            prev_closed = df.iloc[-3]
-            last_closed = df.iloc[-2]
+            # LIVE CROSS:
+            # prev = son kapanmış mum
+            # last = şu an açık olan canlı mum
+            prev = df.iloc[-2]
+            last = df.iloc[-1]
 
-            prev_ema3 = float(prev_closed["ema3"])
-            prev_ema9 = float(prev_closed["ema9"])
+            prev_ema3 = float(prev["ema3"])
+            prev_ema9 = float(prev["ema9"])
 
-            ema3_now = float(last_closed["ema3"])
-            ema9_now = float(last_closed["ema9"])
+            ema3_now = float(last["ema3"])
+            ema9_now = float(last["ema9"])
 
-            price_now = float(last_closed["close"])
+            price_now = float(last["close"])
 
-            prev_rsi = float(prev_closed["rsi"])
-            rsi_now = float(last_closed["rsi"])
+            prev_rsi = float(prev["rsi"])
+            rsi_now = float(last["rsi"])
 
-            signal_candle_time = str(last_closed["datetime"])
+            signal_candle_time = str(last["datetime"])
 
             long_cross = prev_ema3 <= prev_ema9 and ema3_now > ema9_now
             short_cross = prev_ema3 >= prev_ema9 and ema3_now < ema9_now
 
             ema9_slope_up = ema9_now > prev_ema9
-
             rsi_long_ok = rsi_now > RSI_LONG_THRESHOLD and rsi_now > prev_rsi and ema9_slope_up
 
             open_trade = fetch_open_trade_for_symbol(symbol)
 
             if open_trade:
-
                 open_side = str(open_trade["side"]).lower()
 
                 if open_side == "long" and short_cross:
                     self.close_trade(open_trade, price_now, "ema3_below_ema9")
 
                 if open_side == "short" and long_cross and rsi_long_ok:
-
                     self.close_trade(open_trade, price_now, "ema3_above_ema9")
 
                     self.maybe_open_trade(
@@ -319,7 +307,6 @@ class EMA9Worker:
                 return
 
             if long_cross and rsi_long_ok:
-
                 self.maybe_open_trade(
                     symbol,
                     "long",
@@ -333,7 +320,6 @@ class EMA9Worker:
                 )
 
             if short_cross:
-
                 self.maybe_open_trade(
                     symbol,
                     "short",
@@ -347,21 +333,16 @@ class EMA9Worker:
                 )
 
         except Exception as exc:
-
             print(f"Signal scan failed for {symbol}: {exc}")
 
     def run_forever(self) -> None:
-
         init_db()
 
         print("EMA9 worker started.")
 
         while True:
-
             try:
-
                 symbols = self.load_symbols()
-
                 print(f"Scanning {len(symbols)} symbols...")
 
                 for symbol in symbols:
@@ -369,7 +350,6 @@ class EMA9Worker:
                     time.sleep(SYMBOL_SLEEP_SECONDS)
 
             except Exception as exc:
-
                 print(f"Worker loop error: {exc}")
 
             time.sleep(SCAN_INTERVAL_SECONDS)
