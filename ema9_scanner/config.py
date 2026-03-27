@@ -15,6 +15,6 @@ SYMBOL_SLEEP_SECONDS = 0.15
 
 LEVERAGE = 5.0
 
-ENTRY_NOTE = "ema3_9_rsi40_4h_live_v1"
+ENTRY_NOTE = "ema3_9_rsi40_4h_live_cross_v2"
 
 OHLCV_LIMIT = 500
