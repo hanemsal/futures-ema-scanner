@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import List
+from typing import Dict, List
 
 import ccxt
 import pandas as pd
@@ -31,6 +31,10 @@ from storage import (
 )
 
 from telegram_bot import TelegramNotifier
+
+
+# Live cross görüldükten sonra sinyalin korunması gereken minimum süre
+CROSS_CONFIRM_SECONDS = 180
 
 
 def ema(series: pd.Series, length: int) -> pd.Series:
@@ -76,6 +80,9 @@ class EMA9Worker:
         self.notifier = TelegramNotifier()
         self.last_markets_load_ts = 0.0
         self.symbols_cache: List[str] = []
+
+        # symbol -> pending data
+        self.pending_signals: Dict[str, dict] = {}
 
     def load_symbols(self, force: bool = False) -> List[str]:
         now = time.time()
@@ -139,6 +146,60 @@ class EMA9Worker:
 
     def fetch_ticker(self, symbol: str) -> dict:
         return self.exchange.fetch_ticker(symbol)
+
+    def clear_pending_signal(self, symbol: str) -> None:
+        if symbol in self.pending_signals:
+            del self.pending_signals[symbol]
+
+    def set_pending_signal(
+        self,
+        symbol: str,
+        side: str,
+        price: float,
+        signal_candle_time: str,
+        reason: str,
+        ema3_value: float,
+        ema9_value: float,
+        rsi_value: float,
+        notional_24h: float,
+    ) -> None:
+        existing = self.pending_signals.get(symbol)
+        now_ts = time.time()
+
+        if existing and existing["side"] == side:
+            # Aynı yönde pending zaten varsa sadece son değerleri güncelle
+            existing["price"] = price
+            existing["signal_candle_time"] = signal_candle_time
+            existing["reason"] = reason
+            existing["ema3_value"] = ema3_value
+            existing["ema9_value"] = ema9_value
+            existing["rsi_value"] = rsi_value
+            existing["notional_24h"] = notional_24h
+            existing["last_seen_ts"] = now_ts
+            return
+
+        self.pending_signals[symbol] = {
+            "side": side,
+            "first_seen_ts": now_ts,
+            "last_seen_ts": now_ts,
+            "price": price,
+            "signal_candle_time": signal_candle_time,
+            "reason": reason,
+            "ema3_value": ema3_value,
+            "ema9_value": ema9_value,
+            "rsi_value": rsi_value,
+            "notional_24h": notional_24h,
+        }
+
+    def pending_ready(self, symbol: str, side: str) -> bool:
+        pending = self.pending_signals.get(symbol)
+        if not pending:
+            return False
+        if pending["side"] != side:
+            return False
+
+        alive_seconds = time.time() - float(pending["first_seen_ts"])
+        return alive_seconds >= CROSS_CONFIRM_SECONDS
 
     def close_trade(
         self,
@@ -245,18 +306,20 @@ class EMA9Worker:
             notional_24h = float(ticker.get("quoteVolume") or 0.0)
 
             if notional_24h < MIN_NOTIONAL_24H_USDT:
+                self.clear_pending_signal(symbol)
                 return
 
             df = self.fetch_df(symbol)
 
             if df.empty or len(df) < 50:
+                self.clear_pending_signal(symbol)
                 return
 
             df["ema3"] = ema(df["close"], EMA_FAST)
             df["ema9"] = ema(df["close"], EMA_SLOW)
             df["rsi"] = rsi(df["close"], RSI_LENGTH)
 
-            # LIVE CROSS:
+            # live yapı:
             # prev = son kapanmış mum
             # last = şu an açık mum
             prev = df.iloc[-2]
@@ -275,11 +338,11 @@ class EMA9Worker:
 
             signal_candle_time = str(last["datetime"])
 
-            # GERÇEK KESİŞİM
+            # gerçek intrabar kesişim başlangıcı
             long_cross = prev_ema3 <= prev_ema9 and ema3_now > ema9_now
             short_cross = prev_ema3 >= prev_ema9 and ema3_now < ema9_now
 
-            # SADECE YÖN DURUMU
+            # o anki yön
             ema_bullish_now = ema3_now > ema9_now
             ema_bearish_now = ema3_now < ema9_now
 
@@ -293,53 +356,109 @@ class EMA9Worker:
 
             open_trade = fetch_open_trade_for_symbol(symbol)
 
+            # Açık trade varsa sadece exit yönet
             if open_trade:
                 open_side = str(open_trade["side"]).lower()
 
+                # Açık trade varken pending entry tutma
+                self.clear_pending_signal(symbol)
+
                 if open_side == "long":
-                    # Long açıkken exit için gerçek ters kesişim bekleme;
-                    # EMA3 artık EMA9 altına düştüyse kapat.
                     if ema_bearish_now:
                         self.close_trade(open_trade, price_now, "ema3_below_ema9")
                     return
 
                 if open_side == "short":
-                    # Short açıkken exit için EMA3 artık EMA9 üstüne çıktıysa kapat.
                     if ema_bullish_now:
                         self.close_trade(open_trade, price_now, "ema3_above_ema9")
                     return
 
-            # Açık trade yoksa sadece GERÇEK KESİŞİM ile pozisyon aç
+            # Açık trade yoksa pending / confirm mantığı
+            pending = self.pending_signals.get(symbol)
+
+            # LONG pending mantığı
             if long_cross and rsi_long_ok:
-                self.maybe_open_trade(
-                    symbol,
-                    "long",
-                    price_now,
-                    signal_candle_time,
-                    "EMA3 crossed above EMA9 | RSI rising | EMA9 slope up",
-                    ema3_now,
-                    ema9_now,
-                    rsi_now,
-                    notional_24h,
+                self.set_pending_signal(
+                    symbol=symbol,
+                    side="long",
+                    price=price_now,
+                    signal_candle_time=signal_candle_time,
+                    reason=f"EMA3 crossed above EMA9 | RSI rising | EMA9 slope up | hold>{CROSS_CONFIRM_SECONDS}s",
+                    ema3_value=ema3_now,
+                    ema9_value=ema9_now,
+                    rsi_value=rsi_now,
+                    notional_24h=notional_24h,
                 )
+
+            elif pending and pending["side"] == "long":
+                # Pending long devam etsin mi?
+                if ema_bullish_now and rsi_long_ok:
+                    self.set_pending_signal(
+                        symbol=symbol,
+                        side="long",
+                        price=price_now,
+                        signal_candle_time=signal_candle_time,
+                        reason=f"EMA3 crossed above EMA9 | RSI rising | EMA9 slope up | hold>{CROSS_CONFIRM_SECONDS}s",
+                        ema3_value=ema3_now,
+                        ema9_value=ema9_now,
+                        rsi_value=rsi_now,
+                        notional_24h=notional_24h,
+                    )
+                else:
+                    self.clear_pending_signal(symbol)
+
+            # SHORT pending mantığı
+            if short_cross:
+                self.set_pending_signal(
+                    symbol=symbol,
+                    side="short",
+                    price=price_now,
+                    signal_candle_time=signal_candle_time,
+                    reason=f"EMA3 crossed below EMA9 | hold>{CROSS_CONFIRM_SECONDS}s",
+                    ema3_value=ema3_now,
+                    ema9_value=ema9_now,
+                    rsi_value=rsi_now,
+                    notional_24h=notional_24h,
+                )
+
+            elif pending and pending["side"] == "short":
+                if ema_bearish_now:
+                    self.set_pending_signal(
+                        symbol=symbol,
+                        side="short",
+                        price=price_now,
+                        signal_candle_time=signal_candle_time,
+                        reason=f"EMA3 crossed below EMA9 | hold>{CROSS_CONFIRM_SECONDS}s",
+                        ema3_value=ema3_now,
+                        ema9_value=ema9_now,
+                        rsi_value=rsi_now,
+                        notional_24h=notional_24h,
+                    )
+                else:
+                    self.clear_pending_signal(symbol)
+
+            # Pending hazırsa aç
+            pending = self.pending_signals.get(symbol)
+            if not pending:
                 return
 
-            if short_cross:
+            if self.pending_ready(symbol, pending["side"]):
                 self.maybe_open_trade(
-                    symbol,
-                    "short",
-                    price_now,
-                    signal_candle_time,
-                    "EMA3 crossed below EMA9",
-                    ema3_now,
-                    ema9_now,
-                    rsi_now,
-                    notional_24h,
+                    symbol=symbol,
+                    side=str(pending["side"]),
+                    price=float(pending["price"]),
+                    signal_candle_time=str(pending["signal_candle_time"]),
+                    reason=str(pending["reason"]),
+                    ema3_value=float(pending["ema3_value"]),
+                    ema9_value=float(pending["ema9_value"]),
+                    rsi_value=float(pending["rsi_value"]),
+                    notional_24h=float(pending["notional_24h"]),
                 )
-                return
+                self.clear_pending_signal(symbol)
 
         except Exception as exc:
             print(f"Signal scan failed for {symbol}: {exc}")
+            self.clear_pending_signal(symbol)
 
     def run_forever(self) -> None:
         init_db()
