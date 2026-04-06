@@ -584,6 +584,15 @@ def home():
         <h2>Ribbon System</h2>
         <a class="btn secondary" href="/ribbon">Aç</a>
       </div>
+
+      <div class="panel">
+       <h2>Pump Scanner v1</h2>
+       <a href="https://pump-scanner-v1.onrender.com/signals" target="_blank">
+       <button style="background:#6c5ce7;color:white;padding:10px 20px;border:none;border-radius:8px;">
+      Aç
+    </button>
+  </a>
+</div>
     </body>
     </html>
     """
